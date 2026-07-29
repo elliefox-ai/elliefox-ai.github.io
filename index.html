@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELLIE FOX :: FIRST CONTACT</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H, t = 0;
+
+function resize() {
+  W = cv.width = window.innerWidth;
+  H = cv.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Simple synth-style pattern using Web Audio
+let audioCtx, playing = false;
+const bpm = 125;
+const stepMs = 60000 / bpm / 4; // 16th notes
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function kick(time) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.frequency.setValueAtTime(140, time);
+  osc.frequency.exponentialRampToValueAtTime(0.01, time + 0.4);
+  gain.gain.setValueAtTime(0.7, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.4);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(time);
+  osc.stop(time + 0.4);
+}
+
+function hat(time) {
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.05, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buf;
+  const hp = audioCtx.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.frequency.value = 7000;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.15, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
+  noise.connect(hp).connect(gain).connect(audioCtx.destination);
+  noise.start(time);
+}
+
+function bass(time, freq) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.value = freq;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(800, time);
+  filter.frequency.exponentialRampToValueAtTime(100, time + 0.2);
+  gain.gain.setValueAtTime(0.25, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.2);
+  osc.connect(filter).connect(gain).connect(audioCtx.destination);
+  osc.start(time);
+  osc.stop(time + 0.2);
+}
+
+function lead(time, freq) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.08, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.15);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(time);
+  osc.stop(time + 0.15);
+}
+
+// Pattern: 32-step sequence
+const bassLine = [55, 0, 55, 0, 0, 55, 0, 0, 49, 0, 49, 0, 0, 49, 0, 0,
+                  41, 0, 41, 0, 0, 41, 0, 0, 73, 0, 73, 0, 0, 65, 0, 0];
+const leadLine = [0, 0, 0, 0, 220, 0, 0, 261, 0, 0, 0, 329, 0, 261, 0, 220,
+                  0, 0, 0, 196, 261, 0, 0, 329, 0, 0, 392, 0, 329, 0, 261, 0];
+
+let step = 0;
+let nextStepTime = 0;
+
+function scheduler() {
+  if (!playing) return;
+  while (nextStepTime < audioCtx.currentTime + 0.1) {
+    const s = step % 32;
+    // Kick on every 4th step
+    if (s % 4 === 0) kick(nextStepTime);
+    // Hat on off-beats
+    if (s % 2 === 1) hat(nextStepTime);
+    // Bass
+    if (bassLine[s]) bass(nextStepTime, bassLine[s]);
+    // Lead (comes in after 16 steps)
+    if (step >= 16 && leadLine[s]) lead(nextStepTime, leadLine[s]);
+    nextStepTime += stepMs / 1000;
+    step++;
+  }
+}
+
+// Visual scenes
+const SCENES = 4;
+function sceneStartTime(scene) {
+  // Each scene lasts 8 bars (32 steps = 1 bar, so 8 * 32 = 256 steps)
+  // But we'll switch based on time for simplicity: ~12.3s per scene
+  return scene * 12.3;
+}
+
+function drawPlasma(t, W, H) {
+  // Classic plasma effect
+  const scale = 0.012;
+  const ts = t * 1.5;
+  const imgData = ctx.createImageData(W, H);
+  const d = imgData.data;
+
+  for (let y = 0; y < H; y += 2) {
+    for (let x = 0; x < W; x += 2) {
+      const v = Math.sin(x * scale + ts) +
+                Math.sin(y * scale * 1.3 + ts * 0.9) +
+                Math.sin((x + y) * scale * 0.7 + ts * 1.1) +
+                Math.sin(Math.sqrt((x - W/2) ** 2 + (y - H/2) ** 2) * scale * 0.8 + ts);
+
+      const norm = (v + 4) / 8; // 0..1
+      const r = Math.sin(norm * Math.PI * 2 + ts * 0.3) * 127 + 128;
+      const g = Math.sin(norm * Math.PI * 2 + ts * 0.3 + 2) * 127 + 128;
+      const b = Math.sin(norm * Math.PI * 2 + ts * 0.3 + 4) * 127 + 128;
+
+      const idx = (y * W + x) * 4;
+      d[idx] = r; d[idx+1] = g; d[idx+2] = b; d[idx+3] = 255;
+      // Fill 2x2 block for speed
+      if (x + 1 < W) {
+        d[idx+4] = r; d[idx+5] = g; d[idx+6] = b; d[idx+7] = 255;
+      }
+      if (y + 1 < H) {
+        const idx2 = ((y+1) * W + x) * 4;
+        d[idx2] = r; d[idx2+1] = g; d[idx2+2] = b; d[idx2+3] = 255;
+        if (x + 1 < W) {
+          d[idx2+4] = r; d[idx2+5] = g; d[idx2+6] = b; d[idx2+7] = 255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function drawTunnel(t, W, H) {
+  // Raycasting tunnel
+  const cx = W / 2, cy = H / 2;
+  const imgData = ctx.createImageData(W, H);
+  const d = imgData.data;
+
+  for (let y = 0; y < H; y += 2) {
+    for (let x = 0; x < W; x += 2) {
+      const dx = x - cx, dy = y - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const angle = Math.atan2(dy, dx);
+
+      const u = dist * 0.04 + t * 3;
+      const v = angle / Math.PI + t * 0.3;
+
+      const wave = Math.sin(u * 3) * Math.sin(v * 8);
+      const brightness = (wave + 1) * 0.5;
+
+      const fade = Math.max(0, 1 - dist / (Math.min(W, H) * 0.7));
+
+      const r = brightness * 255 * fade * (0.8 + 0.2 * Math.sin(t));
+      const g = brightness * 180 * fade * (0.8 + 0.2 * Math.sin(t + 2));
+      const b = brightness * 220 * fade;
+
+      const idx = (y * W + x) * 4;
+      d[idx] = r; d[idx+1] = g; d[idx+2] = b; d[idx+3] = 255;
+      if (x + 1 < W) {
+        d[idx+4] = r; d[idx+5] = g; d[idx+6] = b; d[idx+7] = 255;
+      }
+      if (y + 1 < H) {
+        const idx2 = ((y+1) * W + x) * 4;
+        d[idx2] = r; d[idx2+1] = g; d[idx2+2] = b; d[idx2+3] = 255;
+        if (x + 1 < W) {
+          d[idx2+4] = r; d[idx2+5] = g; d[idx2+6] = b; d[idx2+7] = 255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function drawStarfield(t, W, H) {
+  // Fade trail
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.15)';
+  ctx.fillRect(0, 0, W, H);
+
+  if (!drawStarfield.stars) {
+    drawStarfield.stars = [];
+    for (let i = 0; i < 300; i++) {
+      drawStarfield.stars.push({
+        x: (Math.random() - 0.5) * W,
+        y: (Math.random() - 0.5) * H,
+        z: Math.random() * 1000 + 1,
+        pz: 0
+      });
+    }
+  }
+
+  const cx = W / 2, cy = H / 2;
+  for (const s of drawStarfield.stars) {
+    s.pz = s.z;
+    s.z -= t * 60 % 100 + 5;
+    if (s.z < 1) {
+      s.z = 1000;
+      s.x = (Math.random() - 0.5) * W;
+      s.y = (Math.random() - 0.5) * H;
+      s.pz = 1000;
+    }
+
+    const sx = (s.x / s.z) * 200 + cx;
+    const sy = (s.y / s.z) * 200 + cy;
+    const psx = (s.x / s.pz) * 200 + cx;
+    const psy = (s.y / s.pz) * 200 + cy;
+
+    const size = Math.max(0.5, (1 - s.z / 1000) * 3);
+    const brightness = 1 - s.z / 1000;
+
+    ctx.strokeStyle = `rgba(${100 + brightness * 155}, ${50 + brightness * 200}, ${200 + brightness * 55}, ${brightness})`;
+    ctx.lineWidth = size;
+    ctx.beginPath();
+    ctx.moveTo(psx, psy);
+    ctx.lineTo(sx, sy);
+    ctx.stroke();
+  }
+}
+
+function drawGreeting(t, W, H) {
+  // Dark fade background with pulsing text
+  const pulse = Math.sin(t * 2) * 0.5 + 0.5;
+  ctx.fillStyle = `rgba(5, 0, 15, 0.2)`;
+  ctx.fillRect(0, 0, W, H);
+
+  // Scanlines
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+  for (let y = 0; y < H; y += 3) {
+    ctx.fillRect(0, y, W, 1);
+  }
+
+  // Glow circles behind text
+  for (let i = 0; i < 5; i++) {
+    const angle = t * 0.5 + i * Math.PI * 0.4;
+    const gx = W / 2 + Math.cos(angle) * W * 0.2;
+    const gy = H / 2 + Math.sin(angle) * H * 0.1;
+    const grad = ctx.createRadialGradient(gx, gy, 0, gx, gy, 200);
+    grad.addColorStop(0, `rgba(255, 100, 200, ${0.15 * pulse})`);
+    grad.addColorStop(1, 'rgba(0,0,0,0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // Main text
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  const fontSize = Math.min(W * 0.08, 72);
+  ctx.font = `bold ${fontSize}px monospace`;
+
+  // Text shadow / glow
+  ctx.shadowColor = '#ff64c8';
+  ctx.shadowBlur = 20 + pulse * 20;
+  ctx.fillStyle = `rgb(255, ${100 + pulse * 100}, ${200 + pulse * 55})`;
+  ctx.fillText('ELLIE FOX', W / 2, H / 2 - fontSize * 0.5);
+
+  ctx.shadowColor = '#64c8ff';
+  ctx.shadowBlur = 15;
+  ctx.font = `bold ${fontSize * 0.5}px monospace`;
+  ctx.fillStyle = `rgb(100, ${200 + pulse * 55}, 255)`;
+  ctx.fillText(':: FIRST CONTACT ::', W / 2, H / 2 + fontSize * 0.4);
+
+  ctx.shadowBlur = 0;
+  ctx.font = `${fontSize * 0.3}px monospace`;
+  ctx.fillStyle = `rgba(200, 200, 200, ${0.4 + pulse * 0.4})`;
+  ctx.fillText('a demo by ellie 🦊', W / 2, H / 2 + fontSize * 1.2);
+}
+
+function getCurrentScene(time) {
+  const sceneDur = 12.3;
+  const totalDur = SCENES * sceneDur;
+  const localTime = time % totalDur;
+  const scene = Math.floor(localTime / sceneDur);
+  return { scene, localTime: localTime % sceneDur };
+}
+
+function drawOverlay(t) {
+  // Subtle vignette
+  const grad = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.3, W/2, H/2, Math.max(W,H)*0.7);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.4)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Scanline overlay for CRT feel
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
+  for (let y = 0; y < H; y += 2) {
+    ctx.fillRect(0, y, W, 1);
+  }
+}
+
+function animate() {
+  t += 0.016; // ~60fps
+
+  const { scene, localTime } = getCurrentScene(t);
+
+  switch(scene) {
+    case 0:
+      drawPlasma(localTime, W, H);
+      break;
+    case 1:
+      drawTunnel(localTime, W, H);
+      break;
+    case 2:
+      drawStarfield(localTime, W, H);
+      break;
+    case 3:
+      drawGreeting(localTime, W, H);
+      break;
+  }
+
+  drawOverlay(t);
+
+  requestAnimationFrame(animate);
+}
+
+// Click to start (browsers require user gesture for audio)
+const overlay = document.createElement('div');
+overlay.style.cssText = `
+  position:fixed; inset:0; background:#000; color:#fff;
+  display:flex; align-items:center; justify-content:center;
+  font-family:monospace; font-size:24px; cursor:pointer;
+  z-index:100; text-align:center;
+`;
+overlay.innerHTML = '▶ CLICK TO START<br><span style="font-size:14px;opacity:0.6">ellie fox :: first contact</span>';
+overlay.onclick = () => {
+  initAudio();
+  playing = true;
+  nextStepTime = audioCtx.currentTime + 0.05;
+  step = 0;
+  setInterval(scheduler, 25);
+  overlay.remove();
+  animate();
+};
+document.body.appendChild(overlay);
+</script>
+</body>
+</html>
