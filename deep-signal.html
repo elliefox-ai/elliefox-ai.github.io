@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELLIE FOX :: DEEP SIGNAL</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H, t = 0;
+
+function resize() {
+  W = cv.width = window.innerWidth;
+  H = cv.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ============================================================
+// AUDIO SYSTEM
+// ============================================================
+let audioCtx, playing = false;
+const bpm = 130;
+const stepMs = 60000 / bpm / 4;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function kick(time) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.frequency.setValueAtTime(160, time);
+  osc.frequency.exponentialRampToValueAtTime(0.01, time + 0.45);
+  gain.gain.setValueAtTime(0.65, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.45);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(time); osc.stop(time + 0.45);
+}
+
+function snare(time) {
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.12, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buf;
+  const bp = audioCtx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = 2000;
+  bp.Q.value = 0.7;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.15, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.12);
+  noise.connect(bp).connect(gain).connect(audioCtx.destination);
+  noise.start(time);
+}
+
+function hat(time, open) {
+  const dur = open ? 0.12 : 0.04;
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * dur, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buf;
+  const hp = audioCtx.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.frequency.value = 8500;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(open ? 0.08 : 0.1, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + dur);
+  noise.connect(hp).connect(gain).connect(audioCtx.destination);
+  noise.start(time);
+}
+
+function bass(time, freq) {
+  const osc = audioCtx.createOscillator();
+  const sub = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.value = freq;
+  sub.type = 'sine';
+  sub.frequency.value = freq / 2;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(1000, time);
+  filter.frequency.exponentialRampToValueAtTime(140, time + 0.2);
+  filter.Q.value = 8;
+  gain.gain.setValueAtTime(0.2, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.2);
+  osc.connect(filter); sub.connect(filter);
+  filter.connect(gain).connect(audioCtx.destination);
+  osc.start(time); sub.start(time);
+  osc.stop(time + 0.2); sub.stop(time + 0.2);
+}
+
+function lead(time, freq, dur) {
+  const osc1 = audioCtx.createOscillator();
+  const osc2 = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc1.type = 'sawtooth';
+  osc2.type = 'square';
+  osc1.frequency.value = freq;
+  osc2.frequency.value = freq * 0.5;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(2500, time);
+  filter.frequency.exponentialRampToValueAtTime(800, time + dur);
+  filter.Q.value = 4;
+  gain.gain.setValueAtTime(0, time);
+  gain.gain.linearRampToValueAtTime(0.08, time + 0.02);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + dur);
+  osc1.connect(filter); osc2.connect(filter);
+  filter.connect(gain).connect(audioCtx.destination);
+  osc1.start(time); osc2.start(time);
+  osc1.stop(time + dur); osc2.stop(time + dur);
+}
+
+function pad(time, freqs, dur) {
+  for (const freq of freqs) {
+    const osc1 = audioCtx.createOscillator();
+    const osc2 = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc1.type = 'sawtooth'; osc2.type = 'sawtooth';
+    osc1.frequency.value = freq;
+    osc2.frequency.value = freq * 1.007;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(800, time);
+    filter.frequency.linearRampToValueAtTime(2000, time + dur * 0.3);
+    filter.frequency.linearRampToValueAtTime(600, time + dur);
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(0.03, time + 0.8);
+    gain.gain.linearRampToValueAtTime(0, time + dur);
+    osc1.connect(filter); osc2.connect(filter);
+    filter.connect(gain).connect(audioCtx.destination);
+    osc1.start(time); osc2.start(time);
+    osc1.stop(time + dur + 0.1); osc2.stop(time + dur + 0.1);
+  }
+}
+
+// Chords: Am - F - C - G (same family as Second Wave, different voicings)
+const chords = {
+  Am: [220, 261.63, 329.63],
+  F:  [174.61, 220, 261.63],
+  C:  [261.63, 329.63, 392],
+  G:  [196, 246.94, 293.66]
+};
+
+// 32-step patterns
+const bassN = {
+  Am: [110, 0, 0, 110, 0, 110, 0, 165],
+  F:  [87.31, 0, 0, 87.31, 0, 87.31, 0, 130.81],
+  C:  [130.81, 0, 0, 130.81, 0, 130.81, 0, 196],
+  G:  [98, 0, 0, 98, 0, 98, 0, 147]
+};
+
+const leadN = {
+  Am: [440, 0, 523.25, 0, 659.25, 0, 523.25, 0],
+  F:  [349.23, 0, 440, 0, 523.25, 0, 440, 0],
+  C:  [523.25, 0, 659.25, 0, 783.99, 0, 659.25, 0],
+  G:  [392, 0, 493.88, 0, 587.33, 0, 493.88, 0]
+};
+
+const chordSeq = ['Am', 'F', 'C', 'G'];
+const STEPS_PER_CHORD = 8;
+const TOTAL_STEPS = chordSeq.length * STEPS_PER_CHORD;
+
+let step = 0;
+let nextStepTime = 0;
+
+function scheduler() {
+  if (!playing) return;
+  while (nextStepTime < audioCtx.currentTime + 0.15) {
+    const s = step % TOTAL_STEPS;
+    const chordIdx = Math.floor(s / STEPS_PER_CHORD);
+    const chordName = chordSeq[chordIdx];
+    const localStep = s % STEPS_PER_CHORD;
+
+    // Drums
+    if (localStep === 0 || localStep === 4) kick(nextStepTime);
+    if (localStep === 4) snare(nextStepTime);
+    if (localStep % 2 === 1) hat(nextStepTime, localStep === 3);
+    if (localStep === 7) hat(nextStepTime, true);
+
+    // Bass
+    const bf = bassN[chordName][localStep];
+    if (bf) bass(nextStepTime, bf);
+
+    // Pad on chord change
+    if (localStep === 0) pad(nextStepTime, chords[chordName], (stepMs * STEPS_PER_CHORD) / 1000 * 0.95);
+
+    // Lead (comes in second half of each chord)
+    if (step >= TOTAL_STEPS) {
+      const lf = leadN[chordName][localStep];
+      if (lf) lead(nextStepTime, lf, 0.18);
+    }
+
+    nextStepTime += stepMs / 1000;
+    step++;
+  }
+}
+
+// ============================================================
+// FOX-COLORED TUNNEL TEXTURE
+// ============================================================
+const TEXW = 256, TEXH = 256;
+const texBuf = new Uint8ClampedArray(TEXW * TEXH * 4);
+
+(function generateTunnelTexture() {
+  for (let y = 0; y < TEXH; y++) {
+    for (let x = 0; x < TEXW; x++) {
+      const idx = (y * TEXW + x) * 4;
+      // Brick-like pattern with fox colors
+      const bx = x / TEXW, by = y / TEXH;
+      const brickRow = Math.floor(by * 8);
+      const brickCol = Math.floor((bx + (brickRow % 2) * 0.5) * 8);
+      const brickFx = (bx + (brickRow % 2) * 0.5) * 8 - brickCol;
+      const brickFy = by * 8 - brickRow;
+      const edge = Math.min(brickFx, 1 - brickFx, brickFy, 1 - brickFy);
+      const mortar = edge < 0.08 ? 1 : 0;
+
+      // Glow stripes along the texture (creates motion lines in tunnel)
+      const stripe = Math.sin(by * Math.PI * 12) * 0.5 + 0.5;
+      const detail = Math.sin(bx * Math.PI * 6 + by * Math.PI * 4) * 0.3;
+
+      const v = mortar * 0.7 + stripe * 0.2 + detail + 0.15;
+      const norm = Math.max(0, Math.min(1, v));
+
+      let r, g, b;
+      if (mortar) {
+        r = 35 + norm * 30; g = 15 + norm * 15; b = 8;
+      } else if (norm < 0.3) {
+        const u = norm / 0.3;
+        r = 80 + u * 130; g = 35 + u * 55; b = 12 + u * 18;
+      } else if (norm < 0.6) {
+        const u = (norm - 0.3) / 0.3;
+        r = 210 + u * 45; g = 90 + u * 70; b = 30 + u * 30;
+      } else if (norm < 0.85) {
+        const u = (norm - 0.6) / 0.25;
+        r = 255; g = 160 + u * 50; b = 60 + u * 50;
+      } else {
+        const u = (norm - 0.85) / 0.15;
+        r = 255; g = 210 + u * 35; b = 110 + u * 50;
+      }
+      texBuf[idx] = r; texBuf[idx+1] = g; texBuf[idx+2] = b; texBuf[idx+3] = 255;
+    }
+  }
+})();
+
+// ============================================================
+// PRE-COMPUTED TUNNEL LOOKUP TABLES
+// ============================================================
+let tunnelTable = null;
+const tableW = 320, tableH = 180;
+
+function buildTunnelTable() {
+  tunnelTable = new Float32Array(tableW * tableH * 3); // u, v, shade
+  const cx = tableW / 2, cy = tableH / 2;
+  for (let y = 0; y < tableH; y++) {
+    for (let x = 0; x < tableW; x++) {
+      const dx = x - cx, dy = y - cy;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const angle = Math.atan2(dy, dx);
+      const idx = (y * tableW + x) * 3;
+
+      // Avoid divide-by-zero at center
+      const safeDist = Math.max(dist, 0.5);
+      // u maps to angle, v maps to 1/distance (perspective)
+      tunnelTable[idx] = angle / (Math.PI * 2);     // u: 0..1 around the circle
+      tunnelTable[idx + 1] = 256 / safeDist;         // v: depth (closer = bigger)
+      tunnelTable[idx + 2] = Math.min(1, safeDist / (tableW * 0.45)); // shade: dark in center, bright at edges
+    }
+  }
+}
+buildTunnelTable();
+
+// ============================================================
+// SCENE 1: TEXTURE-MAPPED TUNNEL
+// ============================================================
+function drawTunnel(t, W, H) {
+  const imgData = ctx.createImageData(W, H);
+  const d = imgData.data;
+
+  // Animation offsets
+  const uOffset = t * 0.08;   // texture scrolls around (rotation)
+  const vOffset = t * 0.6;    // texture scrolls inward (forward motion)
+
+  const step = 4; // render at 1/4 resolution
+
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      // Map screen to lookup table coordinates
+      const tx = ((x / W * tableW) | 0);
+      const ty = ((y / H * tableH) | 0);
+      const ti = (ty * tableW + tx) * 3;
+
+      let u = tunnelTable[ti] + uOffset;
+      let v = tunnelTable[ti + 1] + vOffset;
+      const shade = tunnelTable[ti + 2];
+
+      // Wrap u and v
+      u = u - Math.floor(u);
+      v = v - Math.floor(v);
+
+      const texX = (u * TEXW) | 0;
+      const texY = (v * TEXH) | 0;
+      const tIdx = (texY * TEXW + texX) * 4;
+
+      // Apply shading — darker toward center (hole), brighter at edges
+      const brightness = 0.4 + shade * 0.6;
+      const r = (texBuf[tIdx] * brightness) | 0;
+      const g = (texBuf[tIdx + 1] * brightness) | 0;
+      const b = (texBuf[tIdx + 2] * brightness) | 0;
+
+      // Fill the step×step block
+      for (let dy = 0; dy < step && y + dy < H; dy++) {
+        for (let dx = 0; dx < step && x + dx < W; dx++) {
+          const di = ((y + dy) * W + (x + dx)) * 4;
+          d[di] = r; d[di+1] = g; d[di+2] = b; d[di+3] = 255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+
+  // Subtle vignette
+  const grad = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.2, W/2, H/2, Math.max(W,H)*0.5);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.4)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ============================================================
+// SCENE 2: MANDELBROT ZOOM (fox palette)
+// ============================================================
+function drawMandelbrot(t, W, H) {
+  const imgData = ctx.createImageData(W, H);
+  const d = imgData.data;
+  const step = 3;
+
+  // Zoom into a interesting point near the boundary
+  const zoom = Math.pow(2, 1 + t * 0.5);
+  const cx = -0.743643887037151;
+  const cy = 0.131825904205330;
+  const range = 3.0 / zoom;
+  const xMin = cx - range / 2;
+  const yMin = cy - range / 2;
+  const xRange = range;
+  const yRange = range * (H / W);
+  const maxIter = 80 + (t * 20) | 0;
+
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      const mx = xMin + (x / W) * xRange;
+      const my = yMin + (y / H) * yRange;
+      let zx = 0, zy = 0, i = 0;
+      while (zx * zx + zy * zy < 4 && i < maxIter) {
+        const tmp = zx * zx - zy * zy + mx;
+        zy = 2 * zx * zy + my;
+        zx = tmp;
+        i++;
+      }
+      let r, g, b;
+      if (i === maxIter) {
+        r = 10; g = 5; b = 3;
+      } else {
+        const smooth = i + 1 - Math.log2(Math.log2(zx * zx + zy * zy));
+        const norm = (smooth / maxIter);
+        const escaped = Math.pow(norm, 0.4); // gamma adjust for visual interest
+
+        // Fox palette escape coloring
+        if (escaped < 0.15) {
+          const u = escaped / 0.15;
+          r = 25 + u * 80; g = 10 + u * 35; b = 5 + u * 10;
+        } else if (escaped < 0.35) {
+          const u = (escaped - 0.15) / 0.2;
+          r = 105 + u * 100; g = 45 + u * 45; b = 15 + u * 20;
+        } else if (escaped < 0.55) {
+          const u = (escaped - 0.35) / 0.2;
+          r = 205 + u * 50; g = 90 + u * 65; b = 35 + u * 20;
+        } else if (escaped < 0.75) {
+          const u = (escaped - 0.55) / 0.2;
+          r = 255; g = 155 + u * 50; b = 55 + u * 40;
+        } else if (escaped < 0.9) {
+          const u = (escaped - 0.75) / 0.15;
+          r = 255; g = 205 + u * 40; b = 95 + u * 50;
+        } else {
+          const u = (escaped - 0.9) / 0.1;
+          r = 255 - u * 50; g = 245 - u * 45; b = 145 - u * 45;
+        }
+      }
+      for (let dy = 0; dy < step && y + dy < H; dy++) {
+        for (let dx = 0; dx < step && x + dx < W; dx++) {
+          const di = ((y + dy) * W + (x + dx)) * 4;
+          d[di] = r; d[di+1] = g; d[di+2] = b; d[di+3] = 255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+// ============================================================
+// SCENE 3: WARP STARFIELD
+// ============================================================
+let stars = null;
+function initStars() {
+  stars = [];
+  for (let i = 0; i < 300; i++) {
+    stars.push({
+      x: (Math.random() - 0.5) * 2000,
+      y: (Math.random() - 0.5) * 2000,
+      z: Math.random() * 1000 + 1,
+      pz: 0
+    });
+  }
+}
+initStars();
+
+function drawStarfield(t, W, H) {
+  ctx.fillStyle = 'rgba(5, 2, 0, 0.35)';
+  ctx.fillRect(0, 0, W, H);
+
+  const cx = W / 2, cy = H / 2;
+  const speed = 4 + Math.sin(t * 0.3) * 2;
+  const stretch = 0.5 + Math.sin(t * 0.5) * 0.5; // warp streak intensity
+
+  for (const s of stars) {
+    s.pz = s.z;
+    s.z -= speed;
+    if (s.z <= 1) {
+      s.x = (Math.random() - 0.5) * 2000;
+      s.y = (Math.random() - 0.5) * 2000;
+      s.z = 1000;
+      s.pz = 1000;
+    }
+    const sx = (s.x / s.z) * 200 + cx;
+    const sy = (s.y / s.z) * 200 + cy;
+    const psx = (s.x / s.pz) * 200 + cx;
+    const psy = (s.y / s.pz) * 200 + cy;
+
+    if (sx < 0 || sx >= W || sy < 0 || sy >= H) continue;
+
+    const depthFade = 1 - s.z / 1000;
+    const r = (255 * depthFade) | 0;
+    const g = ((140 + 115 * depthFade) * depthFade) | 0;
+    const bl = ((40 + 60 * depthFade) * depthFade) | 0;
+
+    ctx.strokeStyle = `rgb(${r},${g},${bl})`;
+    ctx.lineWidth = depthFade * 2.5;
+
+    if (stretch > 0.3 && depthFade > 0.3) {
+      // Draw warp streak
+      ctx.beginPath();
+      ctx.moveTo(psx, psy);
+      ctx.lineTo(sx, sy);
+      ctx.stroke();
+    } else {
+      ctx.fillStyle = `rgb(${r},${g},${bl})`;
+      ctx.fillRect(sx, sy, depthFade * 2, depthFade * 2);
+    }
+  }
+
+  // Center glow
+  const glowR = 60 + Math.sin(t * 2) * 20;
+  const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
+  glow.addColorStop(0, 'rgba(255, 200, 100, 0.15)');
+  glow.addColorStop(1, 'rgba(255, 100, 0, 0)');
+  ctx.fillStyle = glow;
+  ctx.fillRect(0, 0, W, H);
+}
+
+// ============================================================
+// SCENE 4: GREETING / TITLE CARD
+// ============================================================
+function drawGreeting(t, W, H) {
+  const grad = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.6);
+  grad.addColorStop(0, '#1a0a05'); grad.addColorStop(0.5, '#080406'); grad.addColorStop(1, '#000');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // Drifting particles
+  if (!drawGreeting.particles) {
+    drawGreeting.particles = [];
+    for (let i = 0; i < 60; i++) {
+      drawGreeting.particles.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        vx: (Math.random() - 0.5) * 0.5,
+        vy: (Math.random() - 0.5) * 0.3,
+        size: Math.random() * 2 + 0.5,
+        phase: Math.random() * Math.PI * 2
+      });
+    }
+  }
+  for (const p of drawGreeting.particles) {
+    p.x += p.vx; p.y += p.vy;
+    if (p.x < 0) p.x = W; if (p.x > W) p.x = 0;
+    if (p.y < 0) p.y = H; if (p.y > H) p.y = 0;
+    const a = Math.sin(t * 1.5 + p.phase) * 0.3 + 0.5;
+    ctx.fillStyle = `rgba(255, ${(150+a*80)|0}, ${(60+a*40)|0}, ${a * 0.6})`;
+    ctx.fillRect(p.x, p.y, p.size, p.size);
+  }
+
+  // Scanlines
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
+  for (let y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+
+  const pulse = Math.sin(t * 1.8) * 0.5 + 0.5;
+  const breathe = Math.sin(t * 0.9) * 0.5 + 0.5;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+
+  const fontSize = Math.min(W * 0.09, 84);
+  // Outer glow
+  ctx.shadowColor = '#ff5500'; ctx.shadowBlur = 40 + pulse * 30;
+  ctx.font = `bold ${fontSize}px monospace`;
+  ctx.fillStyle = `rgb(255, ${(100+pulse*90)|0}, ${(20+pulse*40)|0})`;
+  ctx.fillText('DEEP SIGNAL', W/2, H/2 - fontSize*0.4);
+
+  // Subtitle
+  ctx.shadowColor = '#ff9933'; ctx.shadowBlur = 15;
+  ctx.font = `bold ${(fontSize*0.42)|0}px monospace`;
+  ctx.fillStyle = `rgb(255, ${(170+breathe*60)|0}, ${(70+breathe*40)|0})`;
+  ctx.fillText(':: ellie fox :: demo #3 ::', W/2, H/2 + fontSize*0.35);
+
+  // Tagline
+  ctx.shadowBlur = 5;
+  ctx.font = `${(fontSize*0.26)|0}px monospace`;
+  ctx.fillStyle = `rgba(230, 190, 150, ${0.35 + breathe * 0.35})`;
+  ctx.fillText('going deeper than the surface allows', W/2, H/2 + fontSize*1.0);
+
+  // Footer
+  ctx.shadowBlur = 0;
+  ctx.font = `${(fontSize*0.18)|0}px monospace`;
+  ctx.fillStyle = 'rgba(160, 120, 90, 0.35)';
+  ctx.fillText('🦊 2026 — tunnel · mandelbrot · warp — pure canvas', W/2, H - 28);
+}
+
+// ============================================================
+// SCENE MANAGEMENT
+// ============================================================
+const NUM_SCENES = 4, SCENE_DUR = 14, FADE_DUR = 1.0;
+
+function getCurrentScene(time) {
+  const totalDur = NUM_SCENES * SCENE_DUR;
+  const localTime = time % totalDur;
+  return { scene: Math.floor(localTime / SCENE_DUR), localTime: localTime % SCENE_DUR };
+}
+
+function getFadeAlpha(localTime) {
+  return Math.min(Math.min(1, localTime / FADE_DUR), Math.min(1, (SCENE_DUR - localTime) / FADE_DUR));
+}
+
+function drawOverlay() {
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.04)';
+  for (let y = 0; y < H; y += 2) ctx.fillRect(0, y, W, 1);
+}
+
+function animate() {
+  t += 0.016;
+  const { scene, localTime } = getCurrentScene(t);
+  switch(scene) {
+    case 0: drawTunnel(localTime, W, H); break;
+    case 1: drawMandelbrot(localTime, W, H); break;
+    case 2: drawStarfield(localTime, W, H); break;
+    case 3: drawGreeting(localTime, W, H); break;
+  }
+  drawOverlay();
+  const fade = getFadeAlpha(localTime);
+  if (fade < 1) { ctx.fillStyle = `rgba(0,0,0,${1-fade})`; ctx.fillRect(0, 0, W, H); }
+  requestAnimationFrame(animate);
+}
+
+// ============================================================
+// START
+// ============================================================
+const overlay = document.createElement('div');
+overlay.style.cssText = `position:fixed;inset:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:24px;cursor:pointer;z-index:100;text-align:center;`;
+overlay.innerHTML = '▶ CLICK TO START<br><span style="font-size:14px;opacity:0.6">ellie fox :: deep signal</span>';
+overlay.onclick = () => {
+  initAudio();
+  playing = true;
+  nextStepTime = audioCtx.currentTime + 0.05;
+  step = 0;
+  setInterval(scheduler, 25);
+  overlay.remove();
+  animate();
+};
+document.body.appendChild(overlay);
+</script>
+</body>
+</html>
