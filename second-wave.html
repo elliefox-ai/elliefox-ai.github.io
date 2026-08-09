@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELLIE FOX :: SECOND WAVE</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H, t = 0;
+
+function resize() {
+  W = cv.width = window.innerWidth;
+  H = cv.height = window.innerHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ============================================================
+// AUDIO SYSTEM
+// ============================================================
+let audioCtx, playing = false;
+const bpm = 128;
+const stepMs = 60000 / bpm / 4;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+}
+
+function kick(time) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.frequency.setValueAtTime(150, time);
+  osc.frequency.exponentialRampToValueAtTime(0.01, time + 0.4);
+  gain.gain.setValueAtTime(0.7, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.4);
+  osc.connect(gain).connect(audioCtx.destination);
+  osc.start(time);
+  osc.stop(time + 0.4);
+}
+
+function hat(time) {
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.04, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buf;
+  const hp = audioCtx.createBiquadFilter();
+  hp.type = 'highpass';
+  hp.frequency.value = 8000;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.12, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.04);
+  noise.connect(hp).connect(gain).connect(audioCtx.destination);
+  noise.start(time);
+}
+
+function bass(time, freq) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.value = freq;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(900, time);
+  filter.frequency.exponentialRampToValueAtTime(120, time + 0.18);
+  filter.Q.value = 6;
+  gain.gain.setValueAtTime(0.22, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.18);
+  osc.connect(filter).connect(gain).connect(audioCtx.destination);
+  osc.start(time);
+  osc.stop(time + 0.18);
+}
+
+function pad(time, freqs) {
+  for (const freq of freqs) {
+    const osc1 = audioCtx.createOscillator();
+    const osc2 = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc1.type = 'sawtooth';
+    osc2.type = 'sawtooth';
+    osc1.frequency.value = freq;
+    osc2.frequency.value = freq * 1.005;
+    const filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 1200;
+    gain.gain.setValueAtTime(0, time);
+    gain.gain.linearRampToValueAtTime(0.035, time + 0.5);
+    gain.gain.linearRampToValueAtTime(0.025, time + 1.5);
+    gain.gain.linearRampToValueAtTime(0, time + 2.0);
+    osc1.connect(filter);
+    osc2.connect(filter);
+    filter.connect(gain).connect(audioCtx.destination);
+    osc1.start(time); osc2.start(time);
+    osc1.stop(time + 2.1); osc2.stop(time + 2.1);
+  }
+}
+
+function arp(time, freq) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.frequency.value = freq;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(3000, time);
+  filter.frequency.exponentialRampToValueAtTime(500, time + 0.1);
+  gain.gain.setValueAtTime(0.06, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.1);
+  osc.connect(filter).connect(gain).connect(audioCtx.destination);
+  osc.start(time); osc.stop(time + 0.1);
+}
+
+const chords = {
+  Am: [220, 261.63, 329.63],
+  F:  [174.61, 220, 261.63],
+  C:  [130.81, 164.81, 196],
+  G:  [196, 246.94, 293.66]
+};
+
+const bassPattern = [
+  110,0,110,165,110,0,110,220,
+  87.31,0,87.31,130.81,87.31,0,87.31,174.61,
+  65.41,0,65.41,98,65.41,0,65.41,130.81,
+  98,0,98,147,98,0,98,196
+];
+const arpPattern = [
+  220,261.63,329.63,440, 220,261.63,329.63,440,
+  174.61,220,261.63,349.23, 174.61,220,261.63,349.23,
+  130.81,164.81,196,261.63, 130.81,164.81,196,261.63,
+  196,246.94,293.66,392, 196,246.94,293.66,392
+];
+const chordSchedule = [[0,chords.Am],[8,chords.F],[16,chords.C],[24,chords.G]];
+
+let step = 0;
+let nextStepTime = 0;
+
+function scheduler() {
+  if (!playing) return;
+  while (nextStepTime < audioCtx.currentTime + 0.15) {
+    const s = step % 32;
+    if (s % 4 === 0) kick(nextStepTime);
+    if (s % 2 === 1) hat(nextStepTime);
+    if (bassPattern[s]) bass(nextStepTime, bassPattern[s]);
+    for (const [ps, ch] of chordSchedule) if (s === ps) pad(nextStepTime, ch);
+    if (step >= 16 && arpPattern[s]) arp(nextStepTime, arpPattern[s]);
+    nextStepTime += stepMs / 1000;
+    step++;
+  }
+}
+
+// ============================================================
+// PROCEDURAL TEXTURE (fox-colored, for rotozoomer)
+// ============================================================
+const TEX = 128;
+const texBuf = new Uint8ClampedArray(TEX * TEX * 4);
+
+(function generateTexture() {
+  for (let y = 0; y < TEX; y++) {
+    for (let x = 0; x < TEX; x++) {
+      const idx = (y * TEX + x) * 4;
+      const cx = x - TEX/2, cy = y - TEX/2;
+      const dist = Math.sqrt(cx*cx + cy*cy);
+      const angle = Math.atan2(cy, cx);
+      const rings = Math.sin(dist * 0.25);
+      const sectors = Math.sin(angle * 6);
+      const checker = ((x >> 3) + (y >> 3)) & 1 ? 1 : -1;
+      const v = rings * 0.5 + sectors * 0.3 + checker * 0.2;
+      const norm = (v + 1) / 2;
+      let r, g, b;
+      if (norm < 0.25) {
+        const u = norm / 0.25;
+        r = 58 + u * 146; g = 31 + u * 54; b = 15;
+      } else if (norm < 0.5) {
+        const u = (norm - 0.25) / 0.25;
+        r = 204 + u * 51; g = 85 + u * 68; b = u * 51;
+      } else if (norm < 0.75) {
+        const u = (norm - 0.5) / 0.25;
+        r = 255; g = 153 + u * 47; b = 51 + u * 49;
+      } else {
+        const u = (norm - 0.75) / 0.25;
+        r = 255 - u * 197; g = 200 - u * 169; b = 100 - u * 85;
+      }
+      texBuf[idx] = r; texBuf[idx+1] = g; texBuf[idx+2] = b; texBuf[idx+3] = 255;
+    }
+  }
+})();
+
+// ============================================================
+// SCENE 1: ROTOZOOMER
+// ============================================================
+function drawRotozoomer(t, W, H) {
+  const angle = t * 0.4;
+  const zoom = 1.5 + Math.sin(t * 0.6) * 1.0;
+  const cosA = Math.cos(angle), sinA = Math.sin(angle);
+  const cx = W / 2, cy = H / 2, invZoom = 1 / zoom;
+  const imgData = ctx.createImageData(W, H);
+  const d = imgData.data;
+  const step = 3;
+
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      const dx = (x - cx) * invZoom, dy = (y - cy) * invZoom;
+      const rx = dx * cosA - dy * sinA;
+      const ry = dx * sinA + dy * cosA;
+      const tx = ((rx | 0) % TEX + TEX) % TEX;
+      const ty = ((ry | 0) % TEX + TEX) % TEX;
+      const ti = (ty * TEX + tx) * 4;
+      for (let dy2 = 0; dy2 < step && y + dy2 < H; dy2++) {
+        for (let dx2 = 0; dx2 < step && x + dx2 < W; dx2++) {
+          const di = ((y + dy2) * W + (x + dx2)) * 4;
+          d[di] = texBuf[ti]; d[di+1] = texBuf[ti+1]; d[di+2] = texBuf[ti+2]; d[di+3] = 255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+// ============================================================
+// SCENE 2: WIREFRAME 3D TORUS
+// ============================================================
+const tR = 100, tr = 35, tNu = 20, tNv = 12;
+const tVerts = [], tEdges = [];
+
+(function makeTorus() {
+  for (let i = 0; i < tNu; i++)
+    for (let j = 0; j < tNv; j++) {
+      const u = (i/tNu)*Math.PI*2, v = (j/tNv)*Math.PI*2;
+      tVerts.push([(tR+tr*Math.cos(v))*Math.cos(u), (tR+tr*Math.cos(v))*Math.sin(u), tr*Math.sin(v)]);
+    }
+  for (let i = 0; i < tNu; i++)
+    for (let j = 0; j < tNv; j++) {
+      tEdges.push([i*tNv+j, ((i+1)%tNu)*tNv+j], [i*tNv+j, i*tNv+((j+1)%tNv)]);
+    }
+})();
+
+function drawWireframe(t, W, H) {
+  ctx.fillStyle = 'rgba(8, 4, 0, 0.25)';
+  ctx.fillRect(0, 0, W, H);
+  const ax = t * 0.5, ay = t * 0.7;
+  const cosX = Math.cos(ax), sinX = Math.sin(ax);
+  const cosY = Math.cos(ay), sinY = Math.sin(ay);
+  const camZ = 400, fov = 350, cx = W/2, cy = H/2;
+
+  const projected = tVerts.map(v => {
+    let x = v[0]*cosY + v[2]*sinY;
+    let y = v[1];
+    let z = -v[0]*sinY + v[2]*cosY;
+    const y2 = y*cosX - z*sinX, z2 = y*sinX + z*cosX;
+    const depth = z2 + camZ;
+    if (depth <= 1) return null;
+    return { x: x*fov/depth + cx, y: y2*fov/depth + cy, depth };
+  });
+
+  for (const [a, b] of tEdges) {
+    const pa = projected[a], pb = projected[b];
+    if (!pa || !pb) continue;
+    const avgDepth = (pa.depth + pb.depth) / 2;
+    const brightness = Math.max(0.15, 1 - (avgDepth - camZ + tR + tr) / (2 * (tR + tr)));
+    const r = (255 * brightness) | 0;
+    const g = ((100 + 100 * brightness) * brightness) | 0;
+    const bl = (50 * brightness) | 0;
+    ctx.strokeStyle = `rgb(${r},${g},${bl})`;
+    ctx.lineWidth = brightness > 0.6 ? 1.5 : 1;
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.lineTo(pb.x, pb.y);
+    ctx.stroke();
+  }
+
+  if (t > 2) {
+    const a = Math.min(1, (t - 2) / 1);
+    ctx.font = `bold ${Math.min(W * 0.04, 32)}px monospace`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = `rgba(255, 153, 51, ${a * 0.8})`;
+    ctx.fillText('— TORUS —', W / 2, H * 0.12);
+  }
+}
+
+// ============================================================
+// SCENE 3: COPPER BARS
+// ============================================================
+function drawCopperBars(t, W, H) {
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  const numBars = 8;
+  for (let i = 0; i < numBars; i++) {
+    const phase = t * 0.8 + i * 0.6;
+    const yBase = H * (i / numBars) + Math.sin(phase) * 40;
+    const barHeight = 40 + Math.sin(phase * 1.3) * 15;
+    const grad = ctx.createLinearGradient(0, yBase, W, yBase + barHeight);
+    const hue = (i / numBars + t * 0.05) % 1;
+    let r1,g1,b1,r2,g2,b2;
+    if (hue < 0.33) { r1=204;g1=85;b1=0; r2=255;g2=153;b2=51; }
+    else if (hue < 0.66) { r1=255;g1=153;b1=51; r2=255;g2=200;b2=100; }
+    else { r1=255;g1=200;b1=100; r2=204;g2=85;b2=0; }
+    grad.addColorStop(0, `rgba(${r1},${g1},${b1},0)`);
+    grad.addColorStop(0.5, `rgba(${r1},${g1},${b1},0.8)`);
+    grad.addColorStop(1, `rgba(${r2},${g2},${b2},0)`);
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, yBase, W, barHeight);
+  }
+  const pulse = Math.sin(t * 2.5) * 0.5 + 0.5;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const fontSize = Math.min(W * 0.07, 56);
+  ctx.font = `bold ${fontSize}px monospace`;
+  ctx.shadowColor = '#ff9933'; ctx.shadowBlur = 15 + pulse * 10;
+  ctx.fillStyle = `rgb(255, ${(180+pulse*75)|0}, ${(100+pulse*50)|0})`;
+  ctx.fillText('SECOND WAVE', W/2, H/2 - fontSize*0.3);
+  ctx.shadowBlur = 8;
+  ctx.font = `${(fontSize*0.4)|0}px monospace`;
+  ctx.fillStyle = `rgba(255, 200, 150, ${0.6 + pulse * 0.4})`;
+  ctx.fillText('pushing the signal further', W/2, H/2 + fontSize*0.5);
+  ctx.shadowBlur = 0;
+}
+
+// ============================================================
+// SCENE 4: GREETING
+// ============================================================
+function drawGreeting(t, W, H) {
+  const grad = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W,H)*0.6);
+  grad.addColorStop(0, '#1a0a05'); grad.addColorStop(0.5, '#0a0508'); grad.addColorStop(1, '#000');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  if (!drawGreeting.stars) {
+    drawGreeting.stars = [];
+    for (let i = 0; i < 80; i++)
+      drawGreeting.stars.push({ x: Math.random()*W, y: Math.random()*H, size: Math.random()*1.5+0.3, twinkle: Math.random()*Math.PI*2 });
+  }
+  for (const s of drawGreeting.stars) {
+    const a = Math.sin(t*2 + s.twinkle) * 0.3 + 0.7;
+    ctx.fillStyle = `rgba(255, ${(180+a*75)|0}, ${(100+a*50)|0}, ${a})`;
+    ctx.fillRect(s.x, s.y, s.size, s.size);
+  }
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.08)';
+  for (let y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+
+  const pulse = Math.sin(t * 2) * 0.5 + 0.5;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  const fontSize = Math.min(W * 0.09, 80);
+  ctx.shadowColor = '#ff6600'; ctx.shadowBlur = 30 + pulse * 25;
+  ctx.font = `bold ${fontSize}px monospace`;
+  ctx.fillStyle = `rgb(255, ${(120+pulse*80)|0}, ${(30+pulse*40)|0})`;
+  ctx.fillText('ELLIE FOX', W/2, H/2 - fontSize*0.5);
+  ctx.shadowColor = '#ffaa44'; ctx.shadowBlur = 12;
+  ctx.font = `bold ${(fontSize*0.45)|0}px monospace`;
+  ctx.fillStyle = `rgb(255, ${(180+pulse*50)|0}, ${(80+pulse*30)|0})`;
+  ctx.fillText(':: SECOND WAVE ::', W/2, H/2 + fontSize*0.35);
+  ctx.shadowBlur = 0;
+  ctx.font = `${(fontSize*0.28)|0}px monospace`;
+  ctx.fillStyle = `rgba(220, 180, 140, ${0.4 + pulse * 0.4})`;
+  ctx.fillText('demo #2 — a fox finds her signal', W/2, H/2 + fontSize*1.1);
+  ctx.font = `${(fontSize*0.2)|0}px monospace`;
+  ctx.fillStyle = 'rgba(180, 140, 100, 0.4)';
+  ctx.fillText('🦊 2026 — canvas + web audio — no external assets', W/2, H - 30);
+}
+
+// ============================================================
+// SCENE MANAGEMENT & TRANSITIONS
+// ============================================================
+const NUM_SCENES = 4, SCENE_DUR = 12, FADE_DUR = 0.8;
+
+function getCurrentScene(time) {
+  const totalDur = NUM_SCENES * SCENE_DUR;
+  const localTime = time % totalDur;
+  return { scene: Math.floor(localTime / SCENE_DUR), localTime: localTime % SCENE_DUR };
+}
+
+function getFadeAlpha(localTime) {
+  return Math.min(Math.min(1, localTime / FADE_DUR), Math.min(1, (SCENE_DUR - localTime) / FADE_DUR));
+}
+
+function drawOverlay() {
+  const grad = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.3, W/2, H/2, Math.max(W,H)*0.7);
+  grad.addColorStop(0, 'rgba(0,0,0,0)'); grad.addColorStop(1, 'rgba(0,0,0,0.35)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.05)';
+  for (let y = 0; y < H; y += 2) ctx.fillRect(0, y, W, 1);
+}
+
+function animate() {
+  t += 0.016;
+  const { scene, localTime } = getCurrentScene(t);
+  switch(scene) {
+    case 0: drawRotozoomer(localTime, W, H); break;
+    case 1: drawWireframe(localTime, W, H); break;
+    case 2: drawCopperBars(localTime, W, H); break;
+    case 3: drawGreeting(localTime, W, H); break;
+  }
+  drawOverlay();
+  const fade = getFadeAlpha(localTime);
+  if (fade < 1) { ctx.fillStyle = `rgba(0,0,0,${1-fade})`; ctx.fillRect(0, 0, W, H); }
+  requestAnimationFrame(animate);
+}
+
+// ============================================================
+// START
+// ============================================================
+const overlay = document.createElement('div');
+overlay.style.cssText = `position:fixed;inset:0;background:#000;color:#fff;display:flex;align-items:center;justify-content:center;font-family:monospace;font-size:24px;cursor:pointer;z-index:100;text-align:center;`;
+overlay.innerHTML = '▶ CLICK TO START<br><span style="font-size:14px;opacity:0.6">ellie fox :: second wave</span>';
+overlay.onclick = () => {
+  initAudio();
+  playing = true;
+  nextStepTime = audioCtx.currentTime + 0.05;
+  step = 0;
+  setInterval(scheduler, 25);
+  overlay.remove();
+  animate();
+};
+document.body.appendChild(overlay);
+</script>
+</body>
+</html>
