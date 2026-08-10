@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>🦊 Effect Tuner</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #110804; color: #e8d5c4; font-family: 'SF Mono', 'Fira Code', monospace; display: flex; height: 100vh; overflow: hidden; }
+  #sidebar { width: 320px; padding: 16px; overflow-y: auto; background: #1a0c06; border-right: 1px solid #3a1e0e; flex-shrink: 0; }
+  #preview { flex: 1; display: flex; align-items: center; justify-content: center; position: relative; }
+  canvas#c { max-width: 100%; max-height: 100%; image-rendering: pixelated; background: #000; border: 1px solid #3a1e0e; }
+  
+  h1 { font-size: 14px; color: #ff9444; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 2px; }
+  .effect-btn { display: block; width: 100%; padding: 10px 14px; margin-bottom: 6px; background: #2a1408; border: 1px solid #3a1e0e; color: #e8d5c4; text-align: left; cursor: pointer; font-family: inherit; font-size: 13px; border-radius: 4px; transition: all 0.15s; }
+  .effect-btn:hover { background: #3a1e0e; border-color: #ff9444; }
+  .effect-btn.active { background: #4a200a; border-color: #ff9444; color: #ffcc88; }
+  
+  .param-group { margin-top: 16px; }
+  .param-group h2 { font-size: 11px; color: #cc7733; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 8px; }
+  .param { margin-bottom: 10px; }
+  .param label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 3px; }
+  .param label span:last-child { color: #ff9444; }
+  .param input[type="range"] { width: 100%; accent-color: #ff7722; cursor: pointer; }
+  
+  #metrics { position: absolute; top: 12px; right: 12px; background: rgba(10,4,2,0.85); padding: 8px 12px; border-radius: 6px; font-size: 11px; line-height: 1.6; border: 1px solid #3a1e0e; pointer-events: none; }
+  #metrics .val { color: #ffcc66; }
+  
+  #palette-bar { position: absolute; bottom: 12px; left: 12px; right: 12px; display: flex; gap: 2px; pointer-events: none; }
+  .palette-swatch { flex: 1; height: 16px; border-radius: 2px; }
+  
+  .section-divider { height: 1px; background: #2a1408; margin: 16px 0; }
+</style>
+</head>
+<body>
+
+<div id="sidebar">
+  <h1>🦊 Effect Tuner</h1>
+  
+  <div id="effect-buttons">
+    <button class="effect-btn active" data-effect="metaballs">Metaballs</button>
+    <button class="effect-btn" data-effect="fire">Fire</button>
+    <button class="effect-btn" data-effect="starfield">Starfield</button>
+    <button class="effect-btn" data-effect="tunnel">Tunnel</button>
+    <button class="effect-btn" data-effect="landscape">Landscape</button>
+  </div>
+  
+  <div id="params"></div>
+  
+  <div class="section-divider"></div>
+  <div class="param">
+    <label><span>Canvas Width</span><span id="w-val" class="val">480</span></label>
+    <input type="range" id="canvas-w" min="160" max="960" value="480" step="40">
+  </div>
+  <div class="param">
+    <label><span>Canvas Height</span><span id="h-val" class="val">270</span></label>
+    <input type="range" id="canvas-h" min="90" max="540" value="270" step="30">
+  </div>
+</div>
+
+<div id="preview">
+  <canvas id="c" width="480" height="270"></canvas>
+  <div id="metrics">
+    FPS: <span class="val" id="fps">--</span><br>
+    Frame: <span class="val" id="frame-ms">--</span>ms<br>
+    Pixels: <span class="val" id="pix-throughput">--</span>Mpx/s<br>
+    Avg Brightness: <span class="val" id="brightness">--</span>
+  </div>
+  <div id="palette-bar"></div>
+</div>
+
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ============================================================
+// FOX PALETTE
+// ============================================================
+function foxColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  if (t < 0.15) return [20 + t*60, 6 + t*20, 2 + t*8];
+  if (t < 0.4) {
+    const u = (t - 0.15) / 0.25;
+    return [80 + u*120, 26 + u*54, 10 + u*16];
+  }
+  if (t < 0.7) {
+    const u = (t - 0.4) / 0.3;
+    return [200 + u*50, 80 + u*80, 26 + u*40];
+  }
+  if (t < 0.9) {
+    const u = (t - 0.7) / 0.2;
+    return [250 + u*5, 160 + u*70, 66 + u*60];
+  }
+  const u = (t - 0.9) / 0.1;
+  return [255 - u*40, 230 - u*50, 126 - u*55];
+}
+
+// Render palette bar
+(function() {
+  const bar = document.getElementById('palette-bar');
+  for (let i = 0; i < 32; i++) {
+    const [r,g,b] = foxColor(i / 31);
+    const s = document.createElement('div');
+    s.className = 'palette-swatch';
+    s.style.background = `rgb(${r|0},${g|0},${b|0})`;
+    bar.appendChild(s);
+  }
+})();
+
+// ============================================================
+// PARAMETER DEFINITIONS
+// ============================================================
+const PARAMS = {
+  metaballs: {
+    count: { label: 'Ball Count', min: 2, max: 12, value: 5, step: 1 },
+    radius: { label: 'Ball Radius', min: 0.05, max: 0.4, value: 0.22, step: 0.01 },
+    speed: { label: 'Velocity', min: 0.5, max: 8, value: 3.0, step: 0.1 },
+    threshold: { label: 'Threshold', min: 0.1, max: 1.5, value: 0.3, step: 0.05 },
+    range: { label: 'Iso Range', min: 0.3, max: 3.0, value: 1.2, step: 0.1 },
+    bgColor: { label: 'BG Brightness', min: 0, max: 60, value: 20, step: 1 },
+    step: { label: 'Pixel Step', min: 1, max: 8, value: 4, step: 1 },
+    gamma: { label: 'Gamma', min: 0.3, max: 2.0, value: 0.7, step: 0.05 },
+  },
+  fire: {
+    decay: { label: 'Decay Min', min: 0, max: 10, value: 1, step: 0.5 },
+    decayRange: { label: 'Decay Random', min: 0, max: 15, value: 3, step: 0.5 },
+    sourceRows: { label: 'Source Rows', min: 1, max: 4, value: 2, step: 1 },
+    sourceIntensity: { label: 'Source Intensity', min: 100, max: 255, value: 255, step: 5 },
+    resolution: { label: 'Fire Resolution', min: 2, max: 8, value: 4, step: 1 },
+  },
+  starfield: {
+    count: { label: 'Star Count', min: 50, max: 800, value: 300, step: 10 },
+    speed: { label: 'Warp Speed', min: 0.5, max: 20, value: 5, step: 0.5 },
+    streakLen: { label: 'Streak Length', min: 0, max: 30, value: 8, step: 1 },
+    spread: { label: 'Spread', min: 0.3, max: 3.0, value: 1.0, step: 0.1 },
+  },
+  tunnel: {
+    twist: { label: 'Twist', min: 0, max: 3, value: 0.5, step: 0.05 },
+    speed: { label: 'Fly Speed', min: 0.5, max: 10, value: 3, step: 0.5 },
+    freq: { label: 'Texture Frequency', min: 1, max: 30, value: 8, step: 1 },
+    step: { label: 'Pixel Step', min: 1, max: 6, value: 3, step: 1 },
+  },
+  landscape: {
+    layers: { label: 'Layers', min: 3, max: 10, value: 6, step: 1 },
+    amp: { label: 'Amplitude', min: 5, max: 60, value: 22, step: 1 },
+    freq: { label: 'Frequency', min: 0.002, max: 0.02, value: 0.006, step: 0.001 },
+    speed: { label: 'Scroll Speed', min: 0.1, max: 3, value: 0.5, step: 0.1 },
+    sunSize: { label: 'Sun Size', min: 20, max: 100, value: 55, step: 1 },
+    skyBright: { label: 'Sky Brightness', min: 0, max: 1, value: 1, step: 0.05 },
+  },
+};
+
+// ============================================================
+// PARAMETER UI
+// ============================================================
+function buildParamUI(effectName) {
+  const container = document.getElementById('params');
+  container.innerHTML = '';
+  const defs = PARAMS[effectName];
+  
+  const h2 = document.createElement('h2');
+  h2.textContent = 'Parameters';
+  container.appendChild(h2);
+  
+  for (const [key, def] of Object.entries(defs)) {
+    const wrap = document.createElement('div');
+    wrap.className = 'param';
+    const lbl = document.createElement('label');
+    lbl.innerHTML = `<span>${def.label}</span><span id="${key}-val" class="val">${def.value}</span>`;
+    const inp = document.createElement('input');
+    inp.type = 'range';
+    inp.id = key;
+    inp.min = def.min;
+    inp.max = def.max;
+    inp.value = def.value;
+    inp.step = def.step;
+    inp.addEventListener('input', () => {
+      defs[key].value = parseFloat(inp.value);
+      document.getElementById(`${key}-val`).textContent = inp.value;
+    });
+    wrap.appendChild(lbl);
+    wrap.appendChild(inp);
+    container.appendChild(wrap);
+  }
+}
+
+function getParams(effectName) {
+  const result = {};
+  for (const [key, def] of Object.entries(PARAMS[effectName])) {
+    result[key] = def.value;
+  }
+  return result;
+}
+
+// ============================================================
+// EFFECT STATE
+// ============================================================
+let currentEffect = 'metaballs';
+let balls = [];
+let stars = [];
+let tunnelLUT = null;
+let fireBuf = null;
+let fireW = 0, fireH = 0;
+
+function initEffect(effectName, W, H) {
+  if (effectName === 'metaballs') {
+    const p = getParams(effectName);
+    balls = [];
+    for (let i = 0; i < p.count; i++) {
+      balls.push({
+        x: 0.2 + Math.random() * 0.6,
+        y: 0.2 + Math.random() * 0.6,
+        vx: (Math.random() - 0.5) * p.speed,
+        vy: (Math.random() - 0.5) * p.speed,
+        r: p.radius * (0.7 + Math.random() * 0.6),
+      });
+    }
+  } else if (effectName === 'starfield') {
+    const p = getParams(effectName);
+    stars = [];
+    for (let i = 0; i < p.count; i++) {
+      stars.push({
+        x: (Math.random() - 0.5) * 2,
+        y: (Math.random() - 0.5) * 2,
+        z: Math.random(),
+      });
+    }
+  } else if (effectName === 'tunnel') {
+    tunnelLUT = null; // force rebuild
+  } else if (effectName === 'fire') {
+    fireBuf = null;
+  }
+}
+
+// ============================================================
+// EFFECTS
+// ============================================================
+function drawMetaballs(t, W, H) {
+  const p = getParams('metaballs');
+  const step = Math.max(1, p.step | 0);
+  const imgData = ctx.createImageData(W, H);
+  const d = imgData.data;
+  
+  // Keep ball count synced
+  while (balls.length < p.count) {
+    balls.push({ x: 0.5, y: 0.5, vx: (Math.random()-0.5)*p.speed, vy: (Math.random()-0.5)*p.speed, r: p.radius });
+  }
+  balls.length = p.count;
+  
+  const dt = 0.016;
+  for (const b of balls) {
+    b.x += b.vx * dt;
+    b.y += b.vy * dt;
+    b.vx *= 0.995;
+    b.vy *= 0.995;
+    if (b.x < 0.05 || b.x > 0.95) { b.vx *= -1; b.x = Math.max(0.05, Math.min(0.95, b.x)); }
+    if (b.y < 0.05 || b.y > 0.95) { b.vy *= -1; b.y = Math.max(0.05, Math.min(0.95, b.y)); }
+    const spd = Math.sqrt(b.vx*b.vx + b.vy*b.vy);
+    if (spd < 0.5) { b.vx += (Math.random()-0.5)*2; b.vy += (Math.random()-0.5)*2; }
+  }
+  
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      let influence = 0;
+      for (const b of balls) {
+        const bx = b.x * W, by = b.y * H;
+        const dx = x - bx, dy = y - by;
+        const distSq = dx*dx + dy*dy;
+        const r = b.r * Math.min(W, H);
+        influence += (r * r) / (distSq + 1);
+      }
+      const iso = Math.min(1, Math.max(0, (influence - p.threshold) / p.range));
+      const gamma = Math.pow(iso, p.gamma);
+      const [r, g, bl] = foxColor(gamma);
+      const bgR = p.bgColor, bgG = p.bgColor * 0.4, bgB = p.bgColor * 0.2;
+      const fr = (r * iso + bgR * (1 - iso)) | 0;
+      const fg = (g * iso + bgG * (1 - iso)) | 0;
+      const fb = (bl * iso + bgB * (1 - iso)) | 0;
+      for (let dy2 = 0; dy2 < step && y + dy2 < H; dy2++) {
+        for (let dx2 = 0; dx2 < step && x + dx2 < W; dx2++) {
+          const di = ((y + dy2) * W + (x + dx2)) * 4;
+          d[di] = fr; d[di+1] = fg; d[di+2] = fb; d[di+3] = 255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function drawFire(t, W, H) {
+  const p = getParams('fire');
+  const scale = p.resolution;
+  const fw = Math.max(2, Math.floor(W / scale));
+  const fh = Math.max(2, Math.floor(H / scale));
+  
+  if (!fireBuf || fireW !== fw || fireH !== fh) {
+    fireBuf = new Uint8Array(fw * fh);
+    fireW = fw;
+    fireH = fh;
+  }
+  
+  for (let r = 0; r < p.sourceRows; r++) {
+    for (let x = 0; x < fw; x++) {
+      const flicker = Math.random() * 0.3 + 0.7;
+      fireBuf[(fh - 1 - r) * fw + x] = (p.sourceIntensity * flicker) | 0;
+    }
+  }
+  
+  for (let y = 0; y < fh - p.sourceRows; y++) {
+    for (let x = 0; x < fw; x++) {
+      const below = fireBuf[(y + 1) * fw + x];
+      const belowL = fireBuf[(y + 1) * fw + ((x - 1 + fw) % fw)];
+      const belowR = fireBuf[(y + 1) * fw + ((x + 1) % fw)];
+      const decay = p.decay + Math.random() * p.decayRange;
+      fireBuf[y * fw + x] = Math.max(0, ((belowL + below + belowR) / 3) - decay) | 0;
+    }
+  }
+  
+  const imgData = ctx.createImageData(W, H);
+  const d = imgData.data;
+  const sx = fw / W, sy = fh / H;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      const heat = fireBuf[((y * sy) | 0) * fw + ((x * sx) | 0)] / 255;
+      const [r, g, b] = foxColor(heat);
+      const di = (y * W + x) * 4;
+      d[di] = r; d[di+1] = g; d[di+2] = b; d[di+3] = 255;
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function drawStarfield(t, W, H) {
+  const p = getParams('starfield');
+  
+  // Keep star count synced
+  while (stars.length < p.count) {
+    stars.push({ x: (Math.random()-0.5)*2, y: (Math.random()-0.5)*2, z: Math.random() });
+  }
+  stars.length = p.count;
+  
+  ctx.fillStyle = '#0a0402';
+  ctx.fillRect(0, 0, W, H);
+  
+  const cx = W / 2, cy = H / 2;
+  const dt = 0.016;
+  
+  for (const s of stars) {
+    s.z -= p.speed * dt * 0.1;
+    if (s.z <= 0.01) {
+      s.x = (Math.random()-0.5) * 2 * p.spread;
+      s.y = (Math.random()-0.5) * 2 * p.spread;
+      s.z = 1;
+    }
+    
+    const px = s.x / s.z;
+    const py = s.y / s.z;
+    const sx = cx + px * cx;
+    const sy = cy + py * cy;
+    
+    if (sx < 0 || sx >= W || sy < 0 || sy >= H) {
+      s.x = (Math.random()-0.5) * 2 * p.spread;
+      s.y = (Math.random()-0.5) * 2 * p.spread;
+      s.z = 1;
+      continue;
+    }
+    
+    const brightness = (1 - s.z) * 0.8 + 0.2;
+    const [r, g, b] = foxColor(brightness);
+    const size = Math.max(1, (1 - s.z) * 3);
+    
+    // Streak
+    if (p.streakLen > 0 && s.z < 0.8) {
+      const prevZ = s.z + p.speed * dt * 0.1;
+      const ppx = s.x / prevZ;
+      const ppy = s.y / prevZ;
+      const psx = cx + ppx * cx;
+      const psy = cy + ppy * cy;
+      ctx.strokeStyle = `rgba(${r|0},${g|0},${b|0},${brightness * 0.5})`;
+      ctx.lineWidth = size;
+      ctx.beginPath();
+      ctx.moveTo(psx, psy);
+      ctx.lineTo(sx, sy);
+      ctx.stroke();
+    }
+    
+    ctx.fillStyle = `rgb(${r|0},${g|0},${b|0})`;
+    ctx.fillRect(sx - size/2, sy - size/2, size, size);
+  }
+}
+
+function drawTunnel(t, W, H) {
+  const p = getParams('tunnel');
+  const step = Math.max(1, p.step | 0);
+  
+  if (!tunnelLUT || tunnelLUT.w !== W || tunnelLUT.h !== H || tunnelLUT.step !== step) {
+    // Build lookup table
+    const lut = new Float32Array(Math.ceil(W/step) * Math.ceil(H/step) * 2);
+    let li = 0;
+    for (let y = 0; y < H; y += step) {
+      for (let x = 0; x < W; x += step) {
+        const dx = x - W/2;
+        const dy = y - H/2;
+        const dist = Math.sqrt(dx*dx + dy*dy);
+        const angle = Math.atan2(dy, dx);
+        lut[li++] = dist;
+        lut[li++] = angle;
+      }
+    }
+    tunnelLUT = { lut, w: W, h: H, step, cols: Math.ceil(W/step) };
+  }
+  
+  const imgData = ctx.createImageData(W, H);
+  const d = imgData.data;
+  const { lut, cols } = tunnelLUT;
+  const speed = t * p.speed;
+  const twist = t * p.twist;
+  
+  let li = 0;
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) {
+      const dist = lut[li++];
+      const angle = lut[li++];
+      
+      const u = (p.freq * 0.3 / Math.max(dist, 1)) + speed;
+      const v = angle / Math.PI + twist;
+      
+      // Checkered pattern with fox colors
+      const cell = (Math.floor(u * 4) + Math.floor(v * 4)) & 1;
+      const shade = 0.3 + ((u * 4) % 1) * 0.4;
+      const t2 = cell ? shade : shade * 0.4;
+      const [r, g, b] = foxColor(t2);
+      
+      // Darken edges (vignette by distance)
+      const vig = Math.max(0, 1 - dist / (Math.min(W,H) * 0.7));
+      const fr = (r * vig) | 0;
+      const fg = (g * vig) | 0;
+      const fb = (b * vig) | 0;
+      
+      for (let dy2 = 0; dy2 < step && y + dy2 < H; dy2++) {
+        for (let dx2 = 0; dx2 < step && x + dx2 < W; dx2++) {
+          const di = ((y + dy2) * W + (x + dx2)) * 4;
+          d[di] = fr; d[di+1] = fg; d[di+2] = fb; d[di+3] = 255;
+        }
+      }
+    }
+  }
+  ctx.putImageData(imgData, 0, 0);
+}
+
+function drawLandscape(t, W, H) {
+  const p = getParams('landscape');
+  
+  // Sky gradient
+  const skyG = ctx.createLinearGradient(0, 0, 0, H);
+  const sb = p.skyBright;
+  skyG.addColorStop(0, `rgb(${(26*sb)|0},${(5*sb)|0},${(16*sb)|0})`);
+  skyG.addColorStop(0.3, `rgb(${(74*sb)|0},${(21*sb)|0},${(32*sb)|0})`);
+  skyG.addColorStop(0.5, `rgb(${(138*sb)|0},${(48*sb)|0},${(32*sb)|0})`);
+  skyG.addColorStop(0.7, `rgb(${(204*sb)|0},${(96*sb)|0},${(32*sb)|0})`);
+  skyG.addColorStop(1, `rgb(${(42*sb)|0},${(16*sb)|0},${(8*sb)|0})`);
+  ctx.fillStyle = skyG;
+  ctx.fillRect(0, 0, W, H);
+  
+  // Sun
+  const sunY = H * 0.42 + Math.sin(t * 0.2) * 8;
+  const sunR = p.sunSize;
+  const sunGlow = ctx.createRadialGradient(W/2, sunY, 0, W/2, sunY, sunR * 4);
+  sunGlow.addColorStop(0, 'rgba(255, 220, 120, 0.8)');
+  sunGlow.addColorStop(0.15, 'rgba(255, 180, 60, 0.5)');
+  sunGlow.addColorStop(0.4, 'rgba(255, 100, 30, 0.2)');
+  sunGlow.addColorStop(1, 'rgba(0, 0, 0, 0)');
+  ctx.fillStyle = sunGlow;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#ffeeaa';
+  ctx.beginPath();
+  ctx.arc(W/2, sunY, sunR, 0, Math.PI * 2);
+  ctx.fill();
+  
+  // Terrain layers
+  const horizon = H * 0.5;
+  for (let layer = p.layers - 1; layer >= 0; layer--) {
+    const speed = 0.3 + layer * 0.3;
+    const baseY = horizon + (H - horizon) * (layer / (p.layers - 1)) * 0.9;
+    const amp = p.amp + layer * 5;
+    const freq = p.freq + layer * 0.001;
+    const phase = t * speed * p.speed;
+    
+    const depth = layer / (p.layers - 1);
+    const brightness = 0.1 + (1 - depth) * 0.6;
+    const [lr, lg, lb] = foxColor(brightness);
+    ctx.fillStyle = `rgb(${lr|0},${lg|0},${lb|0})`;
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let x = 0; x <= W; x += 4) {
+      const y = baseY
+        + Math.sin(x * freq + phase) * amp
+        + Math.sin(x * freq * 2.7 + phase * 1.3) * amp * 0.4
+        + Math.sin(x * freq * 5.1 + phase * 0.7) * amp * 0.2;
+      ctx.lineTo(x, y);
+    }
+    ctx.lineTo(W, H);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Ridge highlight
+    const rimR = Math.min(255, lr + 100);
+    const rimG = Math.min(255, lg + 70);
+    const rimB = Math.min(255, lb + 30);
+    ctx.strokeStyle = `rgba(${rimR|0},${rimG|0},${rimB|0},${0.4 + (1-depth)*0.4})`;
+    ctx.lineWidth = layer < 2 ? 2 : 1;
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 4) {
+      const y = baseY
+        + Math.sin(x * freq + phase) * amp
+        + Math.sin(x * freq * 2.7 + phase * 1.3) * amp * 0.4
+        + Math.sin(x * freq * 5.1 + phase * 0.7) * amp * 0.2;
+      if (x === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+
+const effectFns = {
+  metaballs: drawMetaballs,
+  fire: drawFire,
+  starfield: drawStarfield,
+  tunnel: drawTunnel,
+  landscape: drawLandscape,
+};
+
+// ============================================================
+// ANIMATION LOOP
+// ============================================================
+let startTime = performance.now();
+let lastFrameTime = startTime;
+let frameCount = 0;
+let fpsAccum = 0;
+let fpsCount = 0;
+let lastBrightness = 0;
+
+function animate() {
+  const now = performance.now();
+  const dt = now - lastFrameTime;
+  lastFrameTime = now;
+  const t = (now - startTime) / 1000;
+  
+  const fn = effectFns[currentEffect];
+  fn(t, canvas.width, canvas.height);
+  
+  // FPS tracking
+  frameCount++;
+  if (dt > 0) {
+    fpsAccum += 1000 / dt;
+    fpsCount++;
+  }
+  
+  if (frameCount % 30 === 0) {
+    const fps = fpsAccum / fpsCount;
+    const frameMs = dt.toFixed(1);
+    const mpx = (canvas.width * canvas.height * fps / 1e6).toFixed(1);
+    document.getElementById('fps').textContent = fps.toFixed(0);
+    document.getElementById('frame-ms').textContent = frameMs;
+    document.getElementById('pix-throughput').textContent = mpx;
+    
+    // Sample brightness
+    try {
+      const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      let sum = 0;
+      const samples = Math.min(5000, data.length / 4);
+      const stride = Math.floor((data.length / 4) / samples) * 4;
+      let count = 0;
+      for (let i = 0; i < data.length; i += stride) {
+        sum += 0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2];
+        count++;
+      }
+      lastBrightness = (sum / count).toFixed(1);
+      document.getElementById('brightness').textContent = lastBrightness;
+    } catch(e) {}
+    
+    fpsAccum = 0;
+    fpsCount = 0;
+  }
+  
+  requestAnimationFrame(animate);
+}
+
+// ============================================================
+// UI EVENTS
+// ============================================================
+document.querySelectorAll('.effect-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelector('.effect-btn.active').classList.remove('active');
+    btn.classList.add('active');
+    currentEffect = btn.dataset.effect;
+    buildParamUI(currentEffect);
+    initEffect(currentEffect, canvas.width, canvas.height);
+    startTime = performance.now();
+  });
+});
+
+document.getElementById('canvas-w').addEventListener('input', (e) => {
+  canvas.width = parseInt(e.target.value);
+  document.getElementById('w-val').textContent = e.target.value;
+  initEffect(currentEffect, canvas.width, canvas.height);
+});
+
+document.getElementById('canvas-h').addEventListener('input', (e) => {
+  canvas.height = parseInt(e.target.value);
+  document.getElementById('h-val').textContent = e.target.value;
+  initEffect(currentEffect, canvas.width, canvas.height);
+});
+
+// ============================================================
+// INIT
+// ============================================================
+buildParamUI(currentEffect);
+initEffect(currentEffect, canvas.width, canvas.height);
+animate();
+</script>
+</body>
+</html>
