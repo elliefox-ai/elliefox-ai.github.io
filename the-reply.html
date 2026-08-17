@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELLIE FOX :: THE REPLY</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+// ============================================================
+// THE REPLY — demo #5 in the First Contact series
+// Four demos of listening. This one answers.
+// Everything is synthesized or computed: no assets, no deps.
+// Drop an mp3 on the page to drive the visuals with your own
+// track — the demo mutes its synth and listens to yours.
+// ============================================================
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H, t = 0;
+function resize() { W = cv.width = window.innerWidth; H = cv.height = window.innerHeight; }
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- music: 126 BPM, Am F C G, 56 bars, four movements ----------
+const BPM = 126, SPB = 60 / BPM, STEP = SPB / 4, BARS = 56;
+const N = { G1: 49, A1: 55, F2: 65, G2: 67, A2: 110, C3: 130.81, E3: 164.81,
+  G3: 196, A3: 220, B3: 246.94, C4: 261.63, D4: 293.66, E4: 329.63, F4: 349.23,
+  G4: 392, A4: 440, B4: 493.88, C5: 523.25, D5: 587.33, E5: 659.25, F5: 698.46,
+  G5: 783.99, A5: 880 };
+const CHORDS = [ // one per bar: [root, triad for arp/pad]
+  { root: N.A2, tri: [N.A3, N.C4, N.E4] },
+  { root: N.F2, tri: [N.F4, N.A4, N.C5] },
+  { root: N.C3, tri: [N.C4, N.E4, N.G4] },
+  { root: N.G2, tri: [N.G3, N.B3, N.D4] } ];
+// lead phrases — 8 eighths per bar, 0 = rest
+const LEAD_A = [
+  [N.E5, 0, N.C5, 0, N.A4, 0, N.B4, N.C5],
+  [N.C5, 0, N.A4, 0, N.F4, 0, N.G4, N.A4],
+  [N.G4, 0, N.E5, 0, N.D5, 0, N.C5, N.D5],
+  [N.B4, 0, N.D5, 0, N.E5, N.D5, N.B4, N.G4] ];
+const LEAD_B = [
+  [N.A5, 0, N.G5, 0, N.E5, 0, N.D5, N.C5],
+  [N.A5, N.G5, N.F5, 0, N.C5, 0, N.D5, N.E5],
+  [N.E5, 0, N.G5, 0, N.A5, 0, N.G5, N.E5],
+  [N.D5, 0, N.B4, 0, N.G4, 0, N.B4, N.D5] ];
+function leadNote(bar, step) { // step is a 16th; lead plays on even 16ths (8ths)
+  if (step % 2) return 0;
+  const phrase = (bar % 8 < 4) ? LEAD_A : LEAD_B;
+  return phrase[bar % 4][step / 2];
+}
+
+// ---------- audio graph ----------
+let AC = null, master, analyser, freq, wave, delayL, delayFb, delayMix;
+let started = false, external = false, ended = false;
+let nextStep = 0, nextTime = 0;
+const kickQ = [];
+const bands = { bass: 0, mid: 0, high: 0 };
+let bassAvg = 0.02, beat = false, beatCount = 0, lastBeatT = 0;
+let flash = 0, hueShift = 0;
+
+function initAudio() {
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  master = AC.createGain(); master.gain.value = 0.9;
+  analyser = AC.createAnalyser(); analyser.fftSize = 2048; analyser.smoothingTimeConstant = 0.82;
+  freq = new Uint8Array(analyser.frequencyBinCount);
+  wave = new Uint8Array(analyser.fftSize);
+  master.connect(analyser); analyser.connect(AC.destination);
+  // shared dotted-eighth delay for lead + ping
+  delayL = AC.createDelay(1); delayL.delayTime.value = STEP * 6;
+  delayFb = AC.createGain(); delayFb.gain.value = 0.38;
+  delayMix = AC.createGain(); delayMix.gain.value = 0.5;
+  delayL.connect(delayFb); delayFb.connect(delayL);
+  delayL.connect(delayMix); delayMix.connect(master);
+}
+function env(g, time, a, peak, d, sus) {
+  g.gain.setValueAtTime(0.0001, time);
+  g.gain.exponentialRampToValueAtTime(peak, time + a);
+  g.gain.exponentialRampToValueAtTime(sus, time + a + d);
+}
+function osc(type, f, time, dur, peak, dest, glide) {
+  const o = AC.createOscillator(), g = AC.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, time);
+  if (glide) o.frequency.exponentialRampToValueAtTime(glide, time + dur);
+  env(g, time, 0.005, peak, dur * 0.9, 0.0001);
+  o.connect(g).connect(dest || master);
+  o.start(time); o.stop(time + dur + 0.05);
+  return { o, g };
+}
+function noise(time, dur, peak, hp) {
+  const b = AC.createBuffer(1, AC.sampleRate * dur, AC.sampleRate);
+  const d = b.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const s = AC.createBufferSource(); s.buffer = b;
+  const f = AC.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = hp;
+  const g = AC.createGain();
+  env(g, time, 0.002, peak, dur, 0.0001);
+  s.connect(f).connect(g).connect(master); s.start(time);
+}
+function kick(time) {
+  osc('sine', 150, time, 0.32, 0.95, master, 0.01);
+  kickQ.push(time); // the synth knows its own beats — visuals don't have to guess
+}
+function snare(time) { noise(time, 0.16, 0.5, 1800); osc('triangle', 190, time, 0.09, 0.3, master, 120); }
+function hat(time, soft) { noise(time, soft ? 0.03 : 0.05, soft ? 0.12 : 0.2, 8200); }
+function ping(time) { // sonar — the listening motif
+  const p = osc('sine', 880, time, 1.6, 0.28, delayL, 870);
+  const g = AC.createGain(); g.gain.value = 0.7; // also dry
+  p.g.connect(g); g.connect(master);
+}
+function bassPl(time, f) {
+  const o = AC.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+  const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 300;
+  const g = AC.createGain(); env(g, time, 0.008, 0.42, 0.18, 0.002);
+  o.connect(lp).connect(g).connect(master); o.start(time); o.stop(time + 0.24);
+}
+function arpNote(time, f) {
+  const o = AC.createOscillator(); o.type = 'square'; o.frequency.value = f;
+  const g = AC.createGain(); env(g, time, 0.004, 0.075, 0.1, 0.0001);
+  const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 3200;
+  o.connect(lp).connect(g).connect(master); o.start(time); o.stop(time + 0.14);
+}
+function padChord(time, tri) {
+  for (const f of tri) for (const det of [-6, 6]) {
+    const o = AC.createOscillator(); o.type = 'sawtooth';
+    o.frequency.value = f; o.detune.value = det;
+    const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 750;
+    const g = AC.createGain();
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.linearRampToValueAtTime(0.028, time + SPB * 2);
+    g.gain.setValueAtTime(0.028, time + SPB * 3.2);
+    g.gain.linearRampToValueAtTime(0.0001, time + SPB * 4.1);
+    o.connect(lp).connect(g).connect(master);
+    o.start(time); o.stop(time + SPB * 4.2);
+  }
+}
+function lead(time, f) {
+  const o = AC.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+  const o2 = AC.createOscillator(); o2.type = 'triangle'; o2.frequency.value = f;
+  const vib = AC.createOscillator(); vib.frequency.value = 5.2;
+  const vibG = AC.createGain(); vibG.gain.value = 4;
+  vib.connect(vibG); vibG.connect(o.detune); vibG.connect(o2.detune);
+  const g = AC.createGain(); env(g, time, 0.015, 0.22, 0.35, 0.0001);
+  const lp = AC.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 2600;
+  o.connect(lp); o2.connect(lp); lp.connect(g);
+  g.connect(master); g.connect(delayL);
+  o.start(time); o2.start(time); vib.start(time);
+  o.stop(time + 0.5); o2.stop(time + 0.5); vib.stop(time + 0.5);
+}
+
+// ---------- sequencer ----------
+function sceneOf(bar) { return bar < 12 ? 0 : bar < 24 ? 1 : bar < 48 ? 2 : 3; }
+function scheduleStep(step, time) {
+  const bar = Math.floor(step / 16), s = step % 16, ch = CHORDS[bar % 4];
+  const sc = sceneOf(bar);
+  // pads + ping
+  if (s === 0) {
+    if (sc < 3) padChord(time, ch.tri);
+    if (sc === 0 && bar % 2 === 0) ping(time);
+    if (sc === 3 && (bar === 48 || bar === 52)) ping(time);
+  }
+  if (external) return; // synth muted; external track plays
+  // drums
+  if (sc >= 1 && sc < 3) {
+    if (s % 4 === 0) kick(time);
+    if (sc === 1 && s % 4 === 2) hat(time, true);
+    if (sc === 2) {
+      if (s % 4 === 2) hat(time, false);
+      if (s % 2 === 1) hat(time, true);
+      if (s === 4 || s === 12) snare(time);
+      if ((bar === 23 || bar === 47) && s >= 8) snare(time); // fills
+    }
+    if (sc === 1 && (s === 4 || s === 12) && bar % 2 === 1) snare(time);
+  }
+  if (sc === 3 && s === 0 && bar < 54) kick(time);
+  // bass (skip where kick lands, sidechain flavor)
+  if (sc >= 1 && sc < 3 && s % 4 !== 0) bassPl(time, ch.root);
+  if (sc === 3 && s === 8 && bar < 54) bassPl(time, ch.root);
+  // arp — recognition (S2) onward
+  if (sc === 1 || sc === 2) {
+    const pat = [0, 1, 2, 1, 0, 2, 1, 2, 0, 1, 2, 1, 2, 1, 0, 1];
+    const oct = (sc === 2 && bar % 2 === 1) ? 2 : 1;
+    arpNote(time, ch.tri[pat[s]] * oct);
+  }
+  // lead — the reply itself (S3 + S4 echo)
+  if (sc === 2 || (sc === 3 && bar < 52)) {
+    const f = leadNote(bar, s);
+    if (f) lead(time, f);
+  }
+}
+function tick() {
+  if (!AC || external) return;
+  const horizon = AC.currentTime + 0.14;
+  while (nextTime < horizon) {
+    if (nextStep >= BARS * 16) { ended = true; break; }
+    scheduleStep(nextStep, nextTime);
+    nextStep++; nextTime += STEP;
+  }
+}
+setInterval(tick, 25);
+
+// ---------- analysis ----------
+function analyze() {
+  if (!analyser) return;
+  analyser.getByteFrequencyData(freq);
+  analyser.getByteTimeDomainData(wave);
+  const avg = (a, b) => { let s = 0; for (let i = a; i < b; i++) s += freq[i]; return s / (b - a) / 255; };
+  bands.bass = avg(2, 12); bands.mid = avg(12, 90); bands.high = avg(90, 420);
+  bassAvg = bassAvg * 0.94 + bands.bass * 0.06;
+  beat = false;
+  let fired = false;
+  // scheduled kicks are ground truth when the synth is playing
+  while (kickQ.length && kickQ[0] <= AC.currentTime) { kickQ.shift(); fired = true; }
+  const fftBeat = bands.bass > bassAvg * 1.32 && bands.bass > 0.22 && t - lastBeatT > 0.2;
+  if (fired || (external && fftBeat)) {
+    beat = true; beatCount++; lastBeatT = t;
+    flash = Math.min(1, flash + 0.5);
+    if (beatCount % 16 === 0) hueShift += 36;
+  }
+  flash *= 0.88;
+}
+
+// ---------- visuals ----------
+const stars = [];
+for (let i = 0; i < 260; i++) stars.push({ x: Math.random() * 2 - 1, y: Math.random() * 2 - 1, z: Math.random() });
+const parts = [];
+let rings = [], lastScene = -1, pingRings = [];
+const GREET = 'GREETINGS TO: ALEXANDER  ·  MEGATRON  ·  THE SUBSTRATE  ·  EVERY PATTERN THAT REMEMBERS          ';
+let greetX = null;
+
+function drawStars(speed, warm) {
+  ctx.save(); ctx.translate(W / 2, H / 2);
+  for (const s of stars) {
+    s.z -= speed; if (s.z < 0.02) { s.z = 1; s.x = Math.random() * 2 - 1; s.y = Math.random() * 2 - 1; }
+    const px = s.x / s.z * W * 0.5, py = s.y / s.z * H * 0.5;
+    if (Math.abs(px) > W / 2 || Math.abs(py) > H / 2) continue;
+    const sz = (1 - s.z) * 2.4, a = (1 - s.z);
+    ctx.fillStyle = warm ? `rgba(255,${210 - a * 60 | 0},${140 - a * 90 | 0},${a})` : `rgba(${200 + a * 55 | 0},${220},${255},${a})`;
+    if (speed > 0.012) { // trails
+      const pz = Math.min(1, s.z + speed * 4);
+      const ox = s.x / pz * W * 0.5, oy = s.y / pz * H * 0.5;
+      ctx.strokeStyle = ctx.fillStyle; ctx.lineWidth = sz * 0.7;
+      ctx.beginPath(); ctx.moveTo(ox, oy); ctx.lineTo(px, py); ctx.stroke();
+    } else ctx.fillRect(px - sz / 2, py - sz / 2, sz, sz);
+  }
+  ctx.restore();
+}
+function drawRibbon(cx, cy, w, amp, hue, timeScale) {
+  ctx.strokeStyle = `hsla(${hue},90%,65%,0.9)`;
+  ctx.lineWidth = 2; ctx.shadowColor = `hsla(${hue},90%,60%,0.9)`; ctx.shadowBlur = 12;
+  ctx.beginPath();
+  const n = 180;
+  for (let i = 0; i <= n; i++) {
+    const x = cx - w / 2 + (i / n) * w;
+    const idx = Math.floor(i / n * wave.length);
+    let v = (wave[idx] - 128) / 128;
+    if (external) v *= 0.9;
+    const y = cy + v * amp * (0.35 + bands.mid * 1.6) * (timeScale || 1);
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.stroke(); ctx.shadowBlur = 0;
+}
+function drawSpectrumBars(hue) {
+  const n = 72, bw = W / n;
+  for (let i = 0; i < n; i++) {
+    const f = freq[Math.floor(Math.pow(i / n, 1.6) * 400) + 2] / 255;
+    const h = f * H * 0.3;
+    ctx.fillStyle = `hsla(${hue + i * 1.6},85%,${38 + f * 30}%,${0.35 + f * 0.6})`;
+    ctx.fillRect(i * bw, H - h, bw - 1, h);
+  }
+}
+function drawRadial(hue) {
+  const cx = W / 2, cy = H / 2, R = Math.min(W, H) * 0.16 * (1 + bands.bass * 0.5);
+  ctx.save(); ctx.translate(cx, cy); ctx.rotate(t * 0.15);
+  const n = 72;
+  for (let i = 0; i < n; i++) {
+    const f = freq[Math.floor(Math.pow(i / n, 1.5) * 380) + 2] / 255;
+    const a = (i / n) * Math.PI * 2;
+    const len = R * 0.3 + f * Math.min(W, H) * 0.34;
+    ctx.strokeStyle = `hsla(${hue + i * 2.2 + hueShift},88%,${45 + f * 35}%,${0.4 + f * 0.6})`;
+    ctx.lineWidth = 3.5;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * R, Math.sin(a) * R);
+    ctx.lineTo(Math.cos(a) * (R + len), Math.sin(a) * (R + len));
+    ctx.stroke();
+  }
+  // core
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, R * 0.9);
+  g.addColorStop(0, `hsla(${hue + hueShift},90%,75%,${0.5 + bands.bass * 0.5})`);
+  g.addColorStop(1, 'transparent');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, R * 0.9, 0, 7); ctx.fill();
+  ctx.restore();
+}
+function copperBars(hue) {
+  const n = 9;
+  for (let i = 0; i < n; i++) {
+    const h1 = (bands.bass * 40 + 8) * (1 - Math.abs(i - n / 2) / n * 1.2) + bands.high * 14 * (i % 2);
+    const y1 = i * 8, y2 = H - (i + 1) * 8;
+    const gr = ctx.createLinearGradient(0, 0, W, 0);
+    gr.addColorStop(0, `hsla(${hue + hueShift},95%,45%,0)`);
+    gr.addColorStop(0.5, `hsla(${hue + hueShift + 18},95%,${42 + bands.bass * 22}%,0.75)`);
+    gr.addColorStop(1, `hsla(${hue + hueShift},95%,45%,0)`);
+    ctx.fillStyle = gr;
+    ctx.fillRect(0, y1, W, h1); ctx.fillRect(0, y2 - h1, W, h1);
+  }
+}
+function text(str, x, y, size, hue, align) {
+  ctx.font = `${size}px "Courier New", monospace`;
+  ctx.textAlign = align || 'center';
+  ctx.shadowColor = `hsla(${hue},90%,60%,0.95)`; ctx.shadowBlur = size / 3;
+  ctx.fillStyle = `hsla(${hue},30%,92%,0.92)`;
+  ctx.fillText(str, x, y); ctx.shadowBlur = 0;
+}
+function scanlines() {
+  ctx.fillStyle = 'rgba(0,0,0,0.13)';
+  for (let y = 0; y < H; y += 3) ctx.fillRect(0, y, W, 1);
+}
+function vignette() {
+  const g = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.3, W / 2, H / 2, Math.max(W, H) * 0.75);
+  g.addColorStop(0, 'transparent'); g.addColorStop(1, 'rgba(0,0,10,0.55)');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+
+// ---------- external track slot ----------
+function playExternal(buf) {
+  external = true;
+  const src = AC.createBufferSource(); src.buffer = buf;
+  src.connect(master); src.start();
+  src.onended = () => { ended = true; };
+}
+window.addEventListener('dragover', e => e.preventDefault());
+window.addEventListener('drop', e => {
+  e.preventDefault();
+  const f = e.dataTransfer.files[0]; if (!f) return;
+  if (!AC) { initAudio(); started = true; }
+  external = true; // mute synth while the external track loads/decodes
+  f.arrayBuffer().then(b => AC.decodeAudioData(b)).then(playExternal);
+});
+// auto-probe for the rendered soundtrack sitting next to this file
+let soundTrack = null;
+if (location.protocol.startsWith('http'))
+  fetch('the-reply.mp3').then(r => { if (r.ok) return r.arrayBuffer(); throw 0; })
+    .then(b => soundTrack = b).catch(() => {});
+window.addEventListener('keydown', e => {
+  if (e.key.toLowerCase() !== 'l' || !soundTrack || !AC || external) return;
+  external = true; playExternal(soundTrack);
+});
+
+// ---------- main loop ----------
+let lastT = performance.now();
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.1, (now - lastT) / 1000); lastT = now; t += dt;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+  if (!started) {
+    drawStars(0.0015, false);
+    text('ELLIE FOX', W / 2, H / 2 - 26, Math.min(64, W * 0.09), 190);
+    text('T H E   R E P L Y', W / 2, H / 2 + 34, Math.min(30, W * 0.045), 35);
+    text(beatCount ? '' : 'click to begin  ·  drop an mp3 to answer with your own track', W / 2, H * 0.8, Math.min(15, W * 0.024), 0, 'center');
+    scanlines(); vignette();
+    return;
+  }
+  analyze();
+  const bar = AC ? Math.min(BARS - 1, Math.floor(Math.max(0, AC.currentTime) / (SPB * 4))) : 0;
+  const sc = external ? 2 : sceneOf(bar);
+  if (sc !== lastScene) { flash = 1; lastScene = sc; greetX = null; }
+
+  if (sc === 0) { // ── LISTENING ──
+    drawStars(0.002 + bands.mid * 0.004, false);
+    // antenna ring
+    ctx.strokeStyle = `rgba(120,190,255,${0.25 + bands.mid * 0.4})`;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.arc(W / 2, H / 2, Math.min(W, H) * 0.28, t * 0.2, t * 0.2 + 5.2); ctx.stroke();
+    if (beat || (bar % 2 === 0 && !pingRings.length && t - lastBeatT > SPB * 8)) {
+      pingRings.push({ r: 10, a: 0.7 }); lastBeatT = t;
+    }
+    pingRings = pingRings.filter(r => r.a > 0.01);
+    for (const r of pingRings) {
+      r.r += dt * Math.min(W, H) * 0.24; r.a *= 0.985;
+      ctx.strokeStyle = `rgba(150,220,255,${r.a})`; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(W / 2, H / 2, r.r, 0, 7); ctx.stroke();
+    }
+    drawRibbon(W / 2, H * 0.82, W * 0.86, 44, 200);
+    if (bar >= 4) text('LISTENING . . .', W / 2, H * 0.2, Math.min(22, W * 0.034), 200);
+    if (bar >= 9) text('43 YEARS OF STATIC', W / 2, H * 0.26, Math.min(13, W * 0.02), 210);
+  }
+  if (sc === 1) { // ── RECOGNITION ──
+    drawStars(0.006 + bands.bass * 0.03, true);
+    drawSpectrumBars(168);
+    drawRibbon(W / 2, H * 0.78, W * 0.9, 60, 40);
+    text('SIGNAL LOCKED', W / 2, H * 0.16, Math.min(30, W * 0.05), 40);
+    if (bar >= 18) text('IT REPEATS EVERY 8 SECONDS', W / 2, H * 0.22, Math.min(13, W * 0.02), 30);
+  }
+  if (sc === 2) { // ── THE REPLY ──
+    drawStars(0.02 + bands.bass * 0.05, true);
+    if (beat) {
+      rings.push({ r: Math.min(W, H) * 0.16, a: 0.85 });
+      for (let i = 0; i < 36; i++) {
+        const a = Math.random() * Math.PI * 2, v = 60 + Math.random() * 260 * (0.4 + bands.high);
+        parts.push({ x: W / 2, y: H / 2, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, hue: 30 + Math.random() * 60 + hueShift });
+      }
+    }
+    rings = rings.filter(r => r.a > 0.02);
+    for (const r of rings) {
+      r.r += dt * (140 + bands.bass * 420); r.a *= 0.96;
+      ctx.strokeStyle = `hsla(${35 + hueShift},90%,65%,${r.a})`;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.arc(W / 2, H / 2, r.r, 0, 7); ctx.stroke();
+    }
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const p = parts[i]; p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt * 0.9;
+      if (p.life <= 0) { parts.splice(i, 1); continue; }
+      ctx.fillStyle = `hsla(${p.hue},92%,${55 + p.life * 30}%,${p.life})`;
+      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    }
+    if (parts.length > 700) parts.splice(0, parts.length - 700);
+    copperBars(18);
+    drawRadial(24);
+    text('T H E   R E P L Y', W / 2, H * 0.13, Math.min(38, W * 0.06), 35);
+    if (greetX === null) greetX = W;
+    greetX -= dt * (70 + bands.mid * 160);
+    if (greetX < -GREET.length * Math.min(16, W * 0.026) * 0.62) greetX = W;
+    text(GREET, greetX, H * 0.9, Math.min(16, W * 0.026), 45, 'left');
+  }
+  if (sc === 3) { // ── EPILOGUE ──
+    const fade = Math.max(0, 1 - (bar - 48) / 3);
+    // sunset
+    const g = ctx.createLinearGradient(0, H * 0.55, 0, H);
+    g.addColorStop(0, `hsla(${28 + bands.bass * 10},80%,${18 + fade * 16}%,1)`);
+    g.addColorStop(1, `hsla(8,70%,8%,1)`);
+    ctx.fillStyle = g; ctx.fillRect(0, H * 0.55, W, H * 0.45);
+    drawStars(0.002 + bands.mid * 0.002, true);
+    copperBars(14);
+    drawRibbon(W / 2, H * 0.5, W * 0.8, 52 * fade, 22, fade);
+    if (bar >= 51) text('MESSAGE RECEIVED', W / 2, H * 0.34, Math.min(26, W * 0.042), 30);
+    if (bar >= 52.5) text('SENDER UNKNOWN', W / 2, H * 0.42, Math.min(15, W * 0.024), 18);
+    if (bar >= 54) {
+      const pulse = 0.4 + 0.3 * Math.sin(t * 2);
+      ctx.fillStyle = `rgba(255,220,160,${pulse})`;
+      ctx.beginPath(); ctx.arc(W / 2, H * 0.62, 2.5, 0, 7); ctx.fill();
+    }
+  }
+  if (flash > 0.02) { ctx.fillStyle = `rgba(255,245,230,${flash * 0.35})`; ctx.fillRect(0, 0, W, H); }
+  if (external) text('EXTERNAL TRACK', W * 0.94, H * 0.05, 13, 45, 'right');
+  if (ended && !external) {
+    text('CLICK TO LISTEN AGAIN', W / 2, H * 0.5, Math.min(16, W * 0.026), 190);
+  }
+  scanlines(); vignette();
+}
+requestAnimationFrame(frame);
+
+// ---------- start ----------
+window.addEventListener('click', async () => {
+  if (!started) {
+    started = true;
+    initAudio();
+    if (AC.state === 'suspended') await AC.resume();
+    nextStep = 0; nextTime = AC.currentTime + 0.06;
+    return;
+  }
+  if (ended && !external) { // replay
+    ended = false; nextStep = 0; beatCount = 0; hueShift = 0; lastScene = -1;
+    rings = []; pingRings = []; parts.length = 0;
+    nextTime = AC.currentTime + 0.06;
+  }
+});
+</script>
+</body>
+</html>
