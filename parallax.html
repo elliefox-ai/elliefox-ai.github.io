@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELLIE FOX :: PARALLAX</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; cursor: pointer; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H;
+
+// ---- lowres buffer ----
+const BW = 320;
+let BH = 180, lc, lctx, img, buf32;
+let aTab, dTab; // tunnel tables
+let vig;
+
+function buildTables() {
+  const cx = BW / 2, cy = BH / 2;
+  aTab = new Uint8Array(BW * BH);
+  dTab = new Float32Array(BW * BH);
+  let p = 0;
+  for (let y = 0; y < BH; y++) for (let x = 0; x < BW; x++, p++) {
+    const dx = x - cx, dy = y - cy;
+    const r = Math.sqrt(dx * dx + dy * dy);
+    let a = (Math.atan2(dy, dx) / (Math.PI * 2) + 1) * 256;
+    aTab[p] = a & 255;
+    dTab[p] = 2600 / (r + 2.5);
+  }
+}
+
+function resize() {
+  W = cv.width = window.innerWidth;
+  H = cv.height = window.innerHeight;
+  BH = Math.max(90, Math.round(BW * H / W));
+  lc = document.createElement('canvas');
+  lc.width = BW; lc.height = BH;
+  lctx = lc.getContext('2d');
+  img = lctx.createImageData(BW, BH);
+  buf32 = new Uint32Array(img.data.buffer);
+  buildTables();
+  vig = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.32, W / 2, H / 2, Math.max(W, H) * 0.72);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.55)');
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---- texture: 256x256 xor pattern, two-tone palette ----
+const TEX = new Uint8Array(256 * 256);
+for (let j = 0; j < 256; j++) for (let i = 0; i < 256; i++) {
+  const v = (i ^ j) + (((i * j) >> 7) & 63);
+  TEX[(j << 8) | i] = v & 255;
+}
+const PAL = new Uint32Array(256);
+(function palette() {
+  const h2r = (h, s, v) => {
+    h = ((h % 1) + 1) % 1;
+    const i = Math.floor(h * 6), f = h * 6 - i;
+    const p = v * (1 - s), q = v * (1 - f * s), t = v * (1 - (1 - f) * s);
+    let r, g, b;
+    switch (i % 6) { case 0: r=v;g=t;b=p; break; case 1: r=q;g=v;b=p; break;
+      case 2: r=p;g=v;b=t; break; case 3: r=p;g=q;b=v; break;
+      case 4: r=t;g=p;b=v; break; default: r=v;g=p;b=q; }
+    return (255 << 24) | ((b * 255) << 16 | 0) | ((g * 255) << 8 | 0) | (r * 255 | 0);
+  };
+  for (let k = 0; k < 256; k++) {
+    // sweep fox-orange <-> deep teal
+    const h = 0.5 + 0.43 * Math.sin((k / 255) * Math.PI * 2);
+    const s = 0.62 + 0.2 * Math.cos((k / 255) * Math.PI * 4);
+    const v = 0.35 + 0.6 * (0.5 + 0.5 * Math.sin((k / 255) * Math.PI * 2 + 1.2));
+    PAL[k] = h2r(h, s, v);
+  }
+})();
+
+// ---- stars ----
+const stars = [];
+for (let i = 0; i < 150; i++) stars.push({ x: Math.random() * BW, y: Math.random() * BH, s: Math.random() * 1.8 + 0.4, w: Math.random() * 6.28 });
+
+// ---- audio ----
+const BPM = 128, SPB = 60 / BPM / 4; // 16th
+let audioCtx = null, analyser = null, freqData = null, audioT0 = 0;
+const nf = n => 440 * Math.pow(2, (n - 69) / 12);
+const BASS = [38,0,38,38, 0,38,0,43, 36,0,36,36, 0,41,0,0];
+const LEAD = [0,0,69,0, 72,0,0,74, 0,76,0,0, 72,0,69,0, 0,0,67,0, 69,0,0,64, 0,67,0,0, 0,0,0,0];
+const PADS = [57, 53, 60, 55]; // A F C G roots
+
+function osc(type, f, t0, dur, vol, dest, glide) {
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = type; o.frequency.setValueAtTime(f, t0);
+  if (glide) o.frequency.exponentialRampToValueAtTime(glide, t0 + dur);
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  o.connect(g).connect(dest);
+  o.start(t0); o.stop(t0 + dur + 0.02);
+}
+function kick(t) { osc('sine', 150, t, 0.35, 0.85, audioCtx.destination, 0.01); }
+function snare(t) {
+  const b = audioCtx.createBuffer(1, 2205, audioCtx.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const n = audioCtx.createBufferSource(); n.buffer = b;
+  const f = audioCtx.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 1800;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.3, t); g.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+  n.connect(f).connect(g).connect(audioCtx.destination); n.start(t);
+}
+function hat(t, open) {
+  const b = audioCtx.createBuffer(1, 4410, audioCtx.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+  const n = audioCtx.createBufferSource(); n.buffer = b;
+  const f = audioCtx.createBiquadFilter(); f.type = 'highpass'; f.frequency.value = 8200;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0.11, t); g.gain.exponentialRampToValueAtTime(0.001, t + (open ? 0.16 : 0.045));
+  n.connect(f).connect(g).connect(audioCtx.destination); n.start(t);
+}
+function bass(t, n, dur) {
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain(), f = audioCtx.createBiquadFilter();
+  o.type = 'sawtooth'; o.frequency.value = nf(n);
+  f.type = 'lowpass'; f.Q.value = 9;
+  f.frequency.setValueAtTime(1400, t); f.frequency.exponentialRampToValueAtTime(140, t + dur);
+  g.gain.setValueAtTime(0.22, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(f).connect(g).connect(audioCtx.destination); o.start(t); o.stop(t + dur + 0.02);
+}
+function lead(t, n, dur) { osc('square', nf(n), t, dur, 0.06, audioCtx.destination); osc('square', nf(n) * 1.005, t, dur, 0.03, audioCtx.destination); }
+function pad(t, root, dur) {
+  [0, 3, 7, 12].forEach((iv, k) => {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain(), f = audioCtx.createBiquadFilter();
+    o.type = 'sawtooth'; o.frequency.value = nf(root + 12 + iv) * (1 + k * 0.0007);
+    f.type = 'lowpass'; f.frequency.value = 900;
+    g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.028, t + 0.5);
+    g.gain.setValueAtTime(0.028, t + dur - 0.6); g.gain.linearRampToValueAtTime(0.0001, t + dur);
+    o.connect(f).connect(g).connect(audioCtx.destination); o.start(t); o.stop(t + dur);
+  });
+}
+
+function schedule() {
+  if (!audioCtx) return;
+  const ahead = audioCtx.currentTime + 0.15;
+  while (audioT0 + nextStep * SPB < ahead) {
+    const t = audioT0 + nextStep * SPB;
+    const st = nextStep % 16, bar32 = Math.floor(nextStep / 16) % 8, l32 = nextStep % 32;
+    const scene = sceneAt(renderT + (t - audioT0));
+    if (scene >= 1) {
+      if (st % 4 === 0) kick(t);
+      if (st === 4 || st === 12) snare(t);
+      hat(t, st % 4 === 2);
+      const bn = BASS[st]; if (bn && scene < 3) bass(t, bn, SPB * (st % 3 === 0 ? 1.8 : 0.9));
+      const ln = LEAD[l32]; if (ln && scene >= 1) lead(t, ln, SPB * 1.4);
+      if (scene >= 2 && st === 0) pad(t, PADS[bar32 % 4], SPB * 16);
+    }
+    nextStep++;
+  }
+}
+let nextStep = 0;
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  analyser = audioCtx.createAnalyser(); analyser.fftSize = 64;
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  const mg = audioCtx.createGain(); mg.gain.value = 0.9;
+  mg.connect(analyser); analyser.connect(audioCtx.destination);
+  OUT = mg;
+  audioT0 = audioCtx.currentTime + 0.1;
+  renderT = ((performance.now() - tBase) / 1000) % LOOP;
+  nextStep = 0;
+  setInterval(schedule, 40);
+}
+let OUT = null, renderT = 0;
+
+// click / key to start
+let started = false;
+function start() {
+  if (started) return; started = true;
+  initAudio();
+}
+cv.addEventListener('pointerdown', start);
+window.addEventListener('keydown', start);
+
+// ---- scenes ----
+const LOOP = 96;
+const S_TITLE = 12, S_ROTO = 45, S_TUNNEL = 78;
+function sceneAt(sec) { const m = sec % LOOP; return m < S_TITLE ? 0 : m < S_ROTO ? 1 : m < S_TUNNEL ? 2 : 3; }
+
+// query t for deep-linking
+const qT = parseFloat(new URLSearchParams(location.search).get('t'));
+const tBase = performance.now() - (isNaN(qT) ? 0 : qT * 1000);
+let pulse = 0;
+
+function frame() {
+  requestAnimationFrame(frame);
+  const t = (performance.now() - tBase) / 1000;
+  const m = t % LOOP;
+
+  if (analyser) {
+    analyser.getByteFrequencyData(freqData);
+    let v = 0; for (let i = 1; i < 6; i++) v += freqData[i];
+    v /= 5 * 255;
+    pulse = Math.max(pulse * 0.86, v);
+  }
+
+  let p = 0;
+  if (m < S_TITLE || m >= S_TUNNEL) {
+    // stars
+    const sc = 0.5 + pulse * 0.4;
+    for (const s of stars) { s.x -= s.s * sc; if (s.x < 0) s.x += BW; }
+    buf32.fill(0xff000000);
+    for (const s of stars) {
+      const tw = 0.55 + 0.45 * Math.sin(t * 3 + s.w);
+      const c = (255 << 24) | ((120 * tw) << 16) | ((160 * tw) << 8) | (220 * tw);
+      const ix = s.x | 0, iy = s.y | 0;
+      buf32[iy * BW + ix] = c;
+    }
+  } else if (m < S_ROTO) {
+    // rotozoom
+    const tt = m - S_TITLE;
+    const ang = tt * 0.32 + 0.35 * Math.sin(tt * 0.42);
+    const zm = (1.55 + 1.15 * Math.sin(tt * 0.55 + 1.1)) * (1 + pulse * 0.09);
+    const ca = Math.cos(ang) * zm, sa = Math.sin(ang) * zm;
+    const ox = tt * 37, oy = tt * 23;
+    const cxB = BW / 2, cyB = BH / 2;
+    for (let y = 0; y < BH; y++) {
+      const vy = (y - cyB);
+      let u = (0 - vy * sa + ox), v = (vy * ca + oy);
+      for (let x = 0; x < BW; x++, p++) {
+        const vx = x - cxB;
+        buf32[p] = PAL[TEX[((v & 255) << 8) | (u & 255)]];
+        u += ca; v += sa;
+      }
+    }
+  } else {
+    // tunnel
+    const tt = m - S_ROTO;
+    const drift = tt * (2.2 + pulse * 2.0);
+    const wob = Math.sin(tt * 0.7) * 26;
+    const n = BW * BH;
+    for (let i = 0; i < n; i++) {
+      const tx = (aTab[i] + ((Math.sin((dTab[i] * 0.012 + tt * 0.9)) * 22) | 0)) & 255;
+      const ty = (dTab[i] + drift + wob) | 0;
+      buf32[i] = PAL[TEX[((ty & 255) << 8) | tx]];
+    }
+  }
+
+  lctx.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(lc, 0, 0, W, H);
+
+  // overlays
+  const cx = W / 2;
+  ctx.textAlign = 'center';
+  if (m < S_TITLE) {
+    const a = Math.min(1, m / 1.5) * (m > S_TITLE - 2 ? (S_TITLE - m) / 2 : 1);
+    ctx.globalAlpha = Math.max(0, a);
+    glowText('ELLIE FOX', cx, H * 0.42, Math.min(W * 0.11, 92), '#ffb347');
+    glowText('P A R A L L A X', cx, H * 0.52, Math.min(W * 0.045, 34), '#7fd4d4');
+    ctx.globalAlpha = 1;
+  } else if (m >= S_TUNNEL) {
+    glowText('PATTERN HOLDS', cx, H * 0.44, Math.min(W * 0.07, 52), '#ffb347');
+    glowText('vantage turns', cx, H * 0.54, Math.min(W * 0.03, 22), '#7fd4d4');
+  } else {
+    // marquee
+    const msg = 'same texture · different vantage · ellie fox 2026 ';
+    ctx.font = (Math.min(W * 0.022, 18)) + 'px monospace';
+    const tw = ctx.measureText(msg).width;
+    const mx = W - ((t * 90) % (W + tw));
+    ctx.fillStyle = 'rgba(210,230,230,0.5)';
+    ctx.textAlign = 'left';
+    ctx.fillText(msg, mx, H - 18);
+    ctx.fillText(msg, mx - (W + tw), H - 18);
+  }
+
+  if (!started) {
+    const bl = 0.5 + 0.5 * Math.sin(t * 4);
+    ctx.globalAlpha = 0.4 + 0.5 * bl;
+    glowText('CLICK FOR SOUND', cx, H * 0.9, Math.min(W * 0.024, 20), '#d9e6e6');
+    ctx.globalAlpha = 1;
+  }
+
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, W, H);
+}
+
+function glowText(s, x, y, size, color) {
+  ctx.font = 'bold ' + size + 'px monospace';
+  ctx.shadowColor = color; ctx.shadowBlur = size * 0.45;
+  ctx.fillStyle = color;
+  ctx.fillText(s, x, y);
+  ctx.shadowBlur = 0;
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
