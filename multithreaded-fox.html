@@ -22,7 +22,17 @@ canvas { display: block; width: 100%; height: 100%; }
 // ============================================================
 const cv = document.getElementById('c');
 const ctx = cv.getContext('2d');
-let W, H, DPR, S; // S = scale (normalized unit box -> px)
+let W, H, DPR, S, OFFX, OFFY; // S = scale (normalized unit box -> px)
+
+// actual extent of the fox in normalized coords (from control points; re-derived in resize)
+function guideBBox() {
+  let x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+  for (const g of GUIDES) for (let i = 0; i < g.pts.length; i += 2) {
+    x0 = Math.min(x0, g.pts[i]); x1 = Math.max(x1, g.pts[i]);
+    y0 = Math.min(y0, g.pts[i + 1]); y1 = Math.max(y1, g.pts[i + 1]);
+  }
+  return [x0, y0, x1, y1];
+}
 
 function resize() {
   DPR = Math.min(2, window.devicePixelRatio || 1);
@@ -30,7 +40,11 @@ function resize() {
   H = cv.height = Math.floor(window.innerHeight * DPR);
   cv.style.width = window.innerWidth + 'px';
   cv.style.height = window.innerHeight + 'px';
-  S = Math.min(W * 0.92, H * 1.05);
+  const [bx0, by0, bx1, by1] = guideBBox();
+  const bw = Math.max(0.2, bx1 - bx0), bh = Math.max(0.2, by1 - by0);
+  S = Math.min(W * 0.88 / bw, H * 0.84 / bh);       // fit the FOX, not the unit box
+  OFFX = W / 2 - S * (bx0 + bx1) / 2;               // center the fox on screen
+  OFFY = H / 2 - S * (by0 + by1) / 2;
   buildBackground();
 }
 window.addEventListener('resize', resize);
@@ -381,7 +395,7 @@ function render(t) {
   // strands, batched by color bucket
   const paths = COLORS.map(() => new Path2D());
   const lw = (1.15 + pulse * 0.5) * DPR;
-  const offY = H * 0.47, offX = W * 0.5;
+  const offY = OFFY, offX = OFFX;
   let drawn = 0;
   for (const s of shards) {
     const buf = s.latest;
