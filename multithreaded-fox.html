@@ -341,8 +341,9 @@ const qT = parseFloat(new URLSearchParams(location.search).get('t'));
 const tBase = performance.now() - (isNaN(qT) ? 0 : qT * 1000);
 let mouseN = { x: -9, y: -9, act: false };
 window.addEventListener('pointermove', (e) => {
-  mouseN.x = e.clientX / window.innerWidth;
-  mouseN.y = e.clientY / window.innerHeight;
+  // map screen px -> fox unit-box coords (same transform as the renderer: OFFX + u*S)
+  mouseN.x = (e.clientX * DPR - OFFX) / S;
+  mouseN.y = (e.clientY * DPR - OFFY) / S;
   mouseN.act = true;
 });
 window.addEventListener('pointerleave', () => { mouseN.act = false; });
