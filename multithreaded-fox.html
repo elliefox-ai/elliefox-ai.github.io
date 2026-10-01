@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELLIE FOX :: MULTITHREADED FOX</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0d16; }
+canvas { display: block; width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+'use strict';
+// ============================================================
+//  MULTITHREADED FOX — the fox is woven.
+//  Strand simulation runs on real Web Workers (true threads),
+//  marshaled back as transferable Float32Arrays each frame.
+//  Fallback shim keeps the same sim core if workers are blocked.
+// ============================================================
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H, DPR, S; // S = scale (normalized unit box -> px)
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = cv.width = Math.floor(window.innerWidth * DPR);
+  H = cv.height = Math.floor(window.innerHeight * DPR);
+  cv.style.width = window.innerWidth + 'px';
+  cv.style.height = window.innerHeight + 'px';
+  S = Math.min(W * 0.92, H * 1.05);
+  buildBackground();
+}
+window.addEventListener('resize', resize);
+
+// ---- background (rebuilt on resize) ----
+let bgGrad = null, vig = null;
+function buildBackground() {
+  bgGrad = ctx.createRadialGradient(W * 0.42, H * 0.42, 0, W * 0.42, H * 0.42, Math.max(W, H) * 0.75);
+  bgGrad.addColorStop(0, '#191224');
+  bgGrad.addColorStop(0.55, '#100e1e');
+  bgGrad.addColorStop(1, '#070910');
+  vig = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.max(W, H) * 0.72);
+  vig.addColorStop(0, 'rgba(0,0,0,0)');
+  vig.addColorStop(1, 'rgba(0,0,0,0.5)');
+}
+
+// ============================================================
+//  THE WEAVE — guide curves of the fox (normalized coords)
+// ============================================================
+// Each guide: flat [x,y,...] control points, Catmull-Rom sampled.
+// col: 0 rust 1 amber 2 cream 3 dark 4 ember
+const GUIDES = [
+  /* 0 head top -> back of neck */ { pts: [0.54,0.27, 0.62,0.29, 0.70,0.36, 0.74,0.46, 0.74,0.58], col: 0 },
+  /* 1 forehead -> nose          */ { pts: [0.50,0.29, 0.42,0.34, 0.35,0.42, 0.28,0.49, 0.245,0.515], col: 0 },
+  /* 2 nose -> chin -> jaw       */ { pts: [0.26,0.555, 0.32,0.585, 0.40,0.60, 0.48,0.645, 0.55,0.69], col: 2 },
+  /* 3 front ear outer           */ { pts: [0.45,0.315, 0.415,0.20, 0.40,0.125, 0.475,0.235, 0.505,0.29], col: 3 },
+  /* 4 front ear inner           */ { pts: [0.462,0.30, 0.438,0.21, 0.430,0.16, 0.478,0.248], col: 3 },
+  /* 5 back ear outer            */ { pts: [0.555,0.295, 0.552,0.16, 0.556,0.10, 0.615,0.22, 0.638,0.29], col: 3 },
+  /* 6 back ear inner            */ { pts: [0.57,0.285, 0.564,0.175, 0.563,0.135, 0.612,0.238], col: 3 },
+  /* 7 cheek fluff               */ { pts: [0.40,0.50, 0.398,0.585, 0.45,0.638, 0.52,0.668], col: 2 },
+  /* 8 tail top                  */ { pts: [0.73,0.56, 0.82,0.60, 0.915,0.70, 0.93,0.80, 0.84,0.878], col: 0 },
+  /* 9 tail under + tip curl     */ { pts: [0.72,0.68, 0.78,0.705, 0.85,0.765, 0.855,0.825, 0.78,0.858, 0.68,0.805, 0.60,0.752, 0.585,0.70], col: 1 },
+  /* 10 chest / belly            */ { pts: [0.55,0.69, 0.53,0.775, 0.545,0.86, 0.605,0.905], col: 2 },
+  /* 11 throat                   */ { pts: [0.55,0.66, 0.518,0.725, 0.508,0.79], col: 2 },
+  /* 12 neck back fill           */ { pts: [0.74,0.47, 0.72,0.565, 0.685,0.66, 0.635,0.725], col: 0 },
+  /* 13 eye ring                 */ { pts: [0.433,0.437, 0.452,0.425, 0.464,0.442, 0.446,0.453, 0.430,0.448], col: 3 },
+];
+const NG = GUIDES.length;
+
+// strand spec (worker-side): [guideA, guideB, f, phase, speed, col]
+const PTS = 12;        // polyline points per strand
+const LENF = 0.38;     // fraction of guide spanned
+
+function buildStrandSpecs(count) {
+  const spec = new Float32Array(count * 6);
+  // weighted pair pools: [a, b, weight, colMode]  colMode 0=use A col, 1=mix
+  const POOL = [
+    [0, 1, 3.0], [1, 2, 2.5], [0, 12, 2.0], [12, 8, 1.8], [8, 9, 3.2],
+    [9, 9, 1.2], [2, 7, 1.6], [7, 10, 1.8], [10, 11, 1.4], [11, 2, 1.2],
+    [3, 4, 1.4], [5, 6, 1.4], [13, 13, 0.5], [0, 0, 1.0], [1, 1, 0.8],
+  ];
+  let tw = 0; for (const p of POOL) tw += p[2];
+  for (let i = 0; i < count; i++) {
+    let r = Math.random() * tw, pi = 0;
+    for (let k = 0; k < POOL.length; k++) { r -= POOL[k][2]; if (r <= 0) { pi = k; break; } }
+    const [a, b] = POOL[pi];
+    const sameGuide = a === b;
+    const f = sameGuide ? Math.random() * 0.18 : Math.pow(Math.random(), 0.8);
+    const col = GUIDES[a].col;
+    const j = i * 6;
+    spec[j] = a; spec[j + 1] = b; spec[j + 2] = f;
+    spec[j + 3] = Math.random();                    // phase
+    spec[j + 4] = 0.018 + Math.random() * 0.03;     // flow speed (cycles/s)
+    spec[j + 5] = Math.random() < 0.16 ? 4 : col;   // occasional ember highlight
+  }
+  return spec;
+}
+
+// ============================================================
+//  SIM CORE — shared string: runs in workers AND fallback shim
+// ============================================================
+const SIM_SRC = `
+function makeSim(PTS, LENF) {
+  let guides = null, spec = null, count = 0;
+  function gPoint(P, u) {
+    const n = P.length / 2 - 1;
+    if (n < 1) return [P[0], P[1]];
+    let s = u * n, i = Math.floor(s);
+    if (i >= n) i = n - 1; if (i < 0) i = 0;
+    const f = s - i, f2 = f * f, f3 = f2 * f;
+    const i0 = Math.max(i - 1, 0), i3 = Math.min(i + 2, n);
+    const x0 = P[i0*2], y0 = P[i0*2+1], x1 = P[i*2], y1 = P[i*2+1];
+    const x2 = P[(i+1)*2], y2 = P[(i+1)*2+1], x3 = P[i3*2], y3 = P[i3*2+1];
+    return [
+      0.5*(2*x1 + (-x0+x2)*f + (2*x0-5*x1+4*x2-x3)*f2 + (-x0+3*x1-3*x2+x3)*f3),
+      0.5*(2*y1 + (-y0+y2)*f + (2*y0-5*y1+4*y2-y3)*f2 + (-y0+3*y1-3*y2+y3)*f3)
+    ];
+  }
+  function init(msg) {
+    guides = msg.guides.map(g => new Float32Array(g));
+    spec = new Float32Array(msg.spec);
+    count = spec.length / 6;
+  }
+  function tick(m) {
+    const visible = Math.min(count, m.maxStrands | 0);
+    const out = new Float32Array(visible * PTS * 2);
+    const t = m.t, slip = m.slip, pulse = m.pulse || 0;
+    const mx = m.mx, my = m.my, mAct = m.mAct ? 1 : 0;
+    const wobAmp = 0.007 * (1 + pulse * 0.8) * (1 + slip * 5);
+    const R = 0.11, R2 = R * R;
+    for (let i = 0; i < visible; i++) {
+      const j = i * 6;
+      const A = guides[spec[j] | 0], B = guides[spec[j+1] | 0];
+      const f = spec[j+2], ph = spec[j+3], sp = spec[j+4];
+      const u0 = (ph + t * sp) % 1;
+      // per-strand scatter direction (stable hash)
+      const h = Math.sin(ph * 127.1 + spec[j] * 311.7) * 43758.5453;
+      const ha = (h - Math.floor(h)) * 6.2832;
+      const hm = 0.55 + 0.45 * (Math.sin(ph * 269.5) * 0.5 + 0.5);
+      const sx = Math.cos(ha) * slip * 0.42 * hm;
+      const sy = Math.sin(ha) * slip * 0.42 * hm;
+      const o = i * PTS * 2;
+      let px = 0, py = 0, tx = 0, ty = 0;
+      for (let k = 0; k < PTS; k++) {
+        const u = u0 + (k / PTS) * LENF;
+        const pa = gPoint(A, u), pb = gPoint(B, u);
+        const bx = pa[0] + f * (pb[0] - pa[0]);
+        const by = pa[1] + f * (pb[1] - pa[1]);
+        // tangent/normal from guide A
+        const e = 0.01;
+        const qa = gPoint(A, Math.max(0, u - e)), qb = gPoint(A, Math.min(1, u + e));
+        let tgx = qb[0] - qa[0], tgy = qb[1] - qa[1];
+        const tl = Math.sqrt(tgx*tgx + tgy*tgy) || 1;
+        tgx /= tl; tgy /= tl;
+        const nx = -tgy, ny = tgx;
+        const wob = Math.sin(u * 18.85 + t * 1.7 + ph * 9.4) * wobAmp
+                  + Math.sin(u * 37.7 - t * 2.3) * wobAmp * 0.4;
+        let x = bx + nx * wob + sx * hm;
+        let y = by + ny * wob + sy * hm;
+        if (mAct) {
+          const dx = x - mx, dy = y - my, d2 = dx*dx + dy*dy;
+          if (d2 < R2 && d2 > 1e-6) {
+            const d = Math.sqrt(d2), push = (1 - d / R) * 0.05;
+            x += dx / d * push; y += dy / d * push;
+          }
+        }
+        out[o + k*2] = x; out[o + k*2 + 1] = y;
+        px = x; py = y;
+      }
+    }
+    return out;
+  }
+  return { init: init, tick: tick, strandCount: () => count };
+}
+`;
+
+const WORKER_SRC = SIM_SRC + `
+const sim = makeSim(${PTS}, ${LENF});
+onmessage = (e) => {
+  const m = e.data;
+  if (m.type === 'i') { sim.init(m); return; }
+  if (m.type === 't') {
+    const buf = sim.tick(m);
+    postMessage({ type: 'd', seq: m.seq, buf: buf }, [buf.buffer]);
+  }
+};
+`;
+
+// ============================================================
+//  THREAD POOL — real workers via Blob, shim fallback
+// ============================================================
+const POOL_SIZE = Math.max(1, Math.min(4, (navigator.hardwareConcurrency || 4) - 1));
+const STRANDS = 2200;
+
+const shards = []; // {post(msg), onbuf, size, latest}
+let shimSim = null;
+
+function makeShimShard(specSlice, guidesPlain) {
+  // eslint-disable-next-line no-new-func
+  const fn = new Function('return (' + SIM_SRC + ')')();
+  const sim = fn(PTS, LENF);
+  sim.init({ guides: guidesPlain, spec: specSlice });
+  const shard = {
+    size: specSlice.length / 6,
+    latest: null, seqDone: 0,
+    post(msg) {
+      if (msg.type === 'i') return;
+      const buf = sim.tick(msg);
+      shard.latest = buf; shard.seqDone = msg.seq;
+    }
+  };
+  return shard;
+}
+
+function initPool() {
+  const guidesPlain = GUIDES.map(g => g.pts.slice());
+  const per = Math.floor(STRANDS / POOL_SIZE);
+  const fullSpec = buildStrandSpecs(STRANDS);
+  for (let w = 0; w < POOL_SIZE; w++) {
+    const start = w * per * 6;
+    const len = (w === POOL_SIZE - 1) ? fullSpec.length - start : per * 6;
+    const slice = fullSpec.slice(start, start + len);
+    let shard = null;
+    try {
+      const blob = new Blob([WORKER_SRC], { type: 'application/javascript' });
+      const url = URL.createObjectURL(blob);
+      const wk = new Worker(url);
+      wk.onmessage = (e) => {
+        const m = e.data;
+        if (m.type === 'd') { shard.latest = m.buf; shard.seqDone = m.seq; }
+      };
+      wk.onerror = () => {};
+      shard = { post: (msg) => wk.postMessage(msg), size: len / 6, latest: null, seqDone: 0 };
+      shard.post({ type: 'i', guides: guidesPlain, spec: Array.from(slice) });
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      shard = makeShimShard(slice, guidesPlain);
+    }
+    shards.push(shard);
+  }
+}
+initPool();
+const THREAD_COUNT = shards.length;
+
+// ============================================================
+//  AUDIO — quiet night-chip: heartbeat kick, amber arpeggio, pads
+// ============================================================
+let audioCtx = null, analyser = null, freqData = null;
+const BPM = 72, SPB = 60 / BPM / 4;
+let nextStep = 0, audioT0 = 0, pulse = 0;
+
+const nf = n => 440 * Math.pow(2, (n - 69) / 12);
+const ARP = [69, 72, 76, 79, 76, 72, 74, 76, 69, 72, 76, 81, 79, 76, 72, 74];
+const ROOTS = [45, 41, 48, 40]; // A F C E
+
+function tone(type, f, t0, dur, vol, filt) {
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = type; o.frequency.value = f;
+  let node = o;
+  if (filt) {
+    const fl = audioCtx.createBiquadFilter();
+    fl.type = 'lowpass'; fl.frequency.value = filt; fl.Q.value = 4;
+    o.connect(fl); node = fl;
+  }
+  g.gain.setValueAtTime(vol, t0);
+  g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+  node.connect(g).connect(audioCtx.destination);
+  o.start(t0); o.stop(t0 + dur + 0.02);
+}
+function kick(t) {
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.frequency.setValueAtTime(110, t);
+  o.frequency.exponentialRampToValueAtTime(0.02, t + 0.3);
+  g.gain.setValueAtTime(0.32, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
+  o.connect(g).connect(audioCtx.destination);
+  o.start(t); o.stop(t + 0.32);
+}
+function pad(t, root, dur) {
+  [0, 3, 7, 14].forEach((iv, k) => {
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain(), fl = audioCtx.createBiquadFilter();
+    o.type = 'sawtooth';
+    o.frequency.value = nf(root + 12 + iv) * (1 + k * 0.0006);
+    fl.type = 'lowpass'; fl.frequency.value = 750;
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(0.02, t + 0.8);
+    g.gain.setValueAtTime(0.02, t + dur - 0.9);
+    g.gain.linearRampToValueAtTime(0.0001, t + dur);
+    o.connect(fl).connect(g).connect(audioCtx.destination);
+    o.start(t); o.stop(t + dur);
+  });
+}
+function schedule() {
+  if (!audioCtx) return;
+  const ahead = audioCtx.currentTime + 0.15;
+  while (audioT0 + nextStep * SPB < ahead) {
+    const t = audioT0 + nextStep * SPB;
+    const st = nextStep % 16, bar = Math.floor(nextStep / 16) % 4;
+    if (st === 0 || st === 8) kick(t);
+    const an = ARP[nextStep % 32 % 16];
+    if (an && (nextStep % 32) < 16) tone('triangle', nf(an + 12), t, SPB * 2.6, 0.045, 2600);
+    else if (an) tone('square', nf(an + 24), t, SPB * 1.2, 0.016, 3400);
+    if (st === 0) pad(t, ROOTS[bar], SPB * 16);
+    nextStep++;
+  }
+}
+function initAudio() {
+  if (audioCtx) return;
+  try {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    analyser = audioCtx.createAnalyser(); analyser.fftSize = 64;
+    freqData = new Uint8Array(analyser.frequencyBinCount);
+    audioCtx.createGain().connect(analyser);
+    analyser.connect(audioCtx.destination);
+    audioT0 = audioCtx.currentTime + 0.1;
+    setInterval(schedule, 40);
+  } catch (e) { audioCtx = null; }
+}
+
+// ============================================================
+//  TIMELINE / STATE
+// ============================================================
+const qT = parseFloat(new URLSearchParams(location.search).get('t'));
+const tBase = performance.now() - (isNaN(qT) ? 0 : qT * 1000);
+let mouseN = { x: -9, y: -9, act: false };
+window.addEventListener('pointermove', (e) => {
+  mouseN.x = e.clientX / window.innerWidth;
+  mouseN.y = e.clientY / window.innerHeight;
+  mouseN.act = true;
+});
+window.addEventListener('pointerleave', () => { mouseN.act = false; });
+
+function smooth(x) { x = Math.min(1, Math.max(0, x)); return x * x * (3 - 2 * x); }
+function slipAt(t) {
+  // assembly: scattered -> woven over first 5.5s
+  let slip = 1 - smooth(t / 5.5);
+  // periodic slips of the weave (after intro)
+  if (t > 13) {
+    const l = (t - 13) % 17;
+    if (l < 2.6) {
+      const e = l < 1.1 ? smooth(l / 1.1) : 1 - smooth((l - 1.1) / 1.5);
+      slip = Math.max(slip, e * 0.9);
+    }
+  }
+  return slip;
+}
+
+// adaptive quality
+let maxStrands = STRANDS, dtAvg = 16.6, adaptCool = 0;
+
+let seq = 0, latest = { t: 0 };
+function tickWorkers(t, slip) {
+  for (const s of shards) {
+    s.seq = ++seq;
+    s.post({ type: 't', t, slip, pulse, seq: s.seq, maxStrands: Math.round(maxStrands * s.size / STRANDS), mx: mouseN.x, my: mouseN.y, mAct: mouseN.act });
+  }
+}
+
+function glowText(s, x, y, size, color, alpha) {
+  ctx.globalAlpha = alpha === undefined ? 1 : alpha;
+  ctx.font = 'bold ' + size + 'px monospace';
+  ctx.textAlign = 'center';
+  ctx.shadowColor = color; ctx.shadowBlur = size * 0.45;
+  ctx.fillStyle = color;
+  ctx.fillText(s, x, y);
+  ctx.shadowBlur = 0;
+  ctx.globalAlpha = 1;
+}
+
+const COLORS = ['rgba(214,106,36,', 'rgba(237,161,63,', 'rgba(244,231,200,', 'rgba(74,51,37,', 'rgba(255,180,107,'];
+const ALPHAS = [0.5, 0.5, 0.42, 0.6, 0.55];
+
+function render(t) {
+  // background
+  ctx.fillStyle = bgGrad || '#0a0d16';
+  ctx.fillRect(0, 0, W, H);
+
+  // strands, batched by color bucket
+  const paths = COLORS.map(() => new Path2D());
+  const lw = (1.15 + pulse * 0.5) * DPR;
+  const offY = H * 0.47, offX = W * 0.5;
+  let drawn = 0;
+  for (const s of shards) {
+    const buf = s.latest;
+    if (!buf) continue;
+    const vis = Math.min(s.size, Math.round(maxStrands * s.size / STRANDS));
+    const n = Math.min(vis, buf.length / (PTS * 2));
+    for (let i = 0; i < n; i++) {
+      const col = fullCol(s, i);
+      const p = paths[col];
+      const o = i * PTS * 2;
+      p.moveTo(offX + buf[o] * S, offY + buf[o + 1] * S);
+      for (let k = 1; k < PTS; k++) p.lineTo(offX + buf[o + k*2] * S, offY + buf[o + k*2 + 1] * S);
+      drawn++;
+    }
+  }
+  for (let c = 0; c < COLORS.length; c++) {
+    ctx.strokeStyle = COLORS[c] + (ALPHAS[c] * (1 + pulse * 0.3)) + ')';
+    ctx.lineWidth = lw;
+    ctx.lineJoin = 'round';
+    ctx.stroke(paths[c]);
+  }
+
+  // eye glint
+  const eyeX = offX + 0.448 * S, eyeY = offY + 0.439 * S;
+  const gl = 0.55 + 0.45 * Math.sin(t * 2.1);
+  ctx.fillStyle = 'rgba(255,214,150,' + (0.75 * gl) + ')';
+  ctx.beginPath();
+  ctx.arc(eyeX, eyeY, (1.6 + pulse * 1.4) * DPR, 0, 6.2832);
+  ctx.fill();
+
+  // overlays
+  const slip = slipAt(t);
+  if (t < 6.5) {
+    const a = Math.min(1, t / 1.5) * (t > 4.5 ? (6.5 - t) / 2 : 1);
+    glowText('ELLIE FOX', W / 2, H * 0.16, Math.min(W / DPR * 0.075, 64), '#ffb347', Math.max(0, a));
+    glowText('M U L T I T H R E A D E D   F O X', W / 2, H * 0.24, Math.min(W * 0.03, 26), '#f4e7c8', Math.max(0, a * 0.9));
+  }
+  if (slip > 0.45) {
+    glowText('· slips the weave ·', W / 2, H * 0.87, Math.min(W * 0.028, 24), '#eda13f', (slip - 0.45) / 0.55);
+  }
+  // marquee footer
+  const msg = 'woven on ' + THREAD_COUNT + ' thread' + (THREAD_COUNT > 1 ? 's' : '') + ' · ' + drawn + ' strands · ellie fox 2026 ';
+  ctx.font = Math.min(W / DPR * 0.022, 16) + 'px monospace';
+  ctx.textAlign = 'left';
+  ctx.fillStyle = 'rgba(210,215,235,0.45)';
+  const dispW = ctx.measureText(msg).width;
+  const mx = W - ((t * 60 * DPR) % (W + dispW * 2));
+  ctx.fillText(msg, mx, H - 14 * DPR);
+  ctx.fillText(msg, mx - (W + dispW * 2), H - 14 * DPR);
+
+  if (!started) {
+    const bl = 0.5 + 0.5 * Math.sin(t * 4);
+    glowText('CLICK FOR SOUND', W / 2, H * 0.93, Math.min(W / DPR * 0.024, 18), '#d9e6e6', 0.4 + 0.5 * bl);
+  }
+
+  ctx.fillStyle = vig || 'rgba(0,0,0,0)';
+  ctx.fillRect(0, 0, W, H);
+}
+
+// Per-strand color bucket — deterministic per-strand hash with the same
+// distribution as the spec (rust-dominant, ~16% ember highlights).
+function fullCol(shard, i) {
+  const h = Math.sin(i * 12.9898) * 43758.5453;
+  const r = h - Math.floor(h);
+  if (r < 0.16) return 4;
+  if (r < 0.34) return 1;
+  if (r < 0.52) return 2;
+  if (r < 0.72) return 3;
+  return 0;
+}
+
+// ============================================================
+//  MAIN LOOP
+// ============================================================
+let started = false;
+function start() { if (started) return; started = true; initAudio(); }
+cv.addEventListener('pointerdown', start);
+window.addEventListener('keydown', start);
+
+function frame() {
+  requestAnimationFrame(frame);
+  const now = performance.now();
+  const t = (now - tBase) / 1000;
+  const dt = now - (frame._last || now);
+  frame._last = now;
+  dtAvg += (dt - dtAvg) * 0.05;
+
+  if (analyser) {
+    analyser.getByteFrequencyData(freqData);
+    let v = 0; for (let i = 1; i < 5; i++) v += freqData[i];
+    pulse = Math.max(pulse * 0.88, v / (4 * 255));
+  }
+
+  const slip = slipAt(t);
+  tickWorkers(t, slip);
+
+  // adaptive: every ~2.5s adjust strand budget
+  adaptCool -= dt;
+  if (adaptCool <= 0) {
+    adaptCool = 2500;
+    if (dtAvg > 20 && maxStrands > 700) maxStrands = Math.max(700, Math.round(maxStrands * 0.82));
+    else if (dtAvg < 14.5 && maxStrands < STRANDS) maxStrands = Math.min(STRANDS, Math.round(maxStrands * 1.12));
+  }
+
+  render(t);
+}
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

@@ -8,10 +8,14 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
 canvas { display: block; width: 100%; height: 100%; }
+.demo-nav { position: fixed; right: 12px; bottom: 10px; z-index: 50; font-family: monospace; font-size: 12px; }
+.demo-nav a { color: rgba(200,220,220,0.35); text-decoration: none; margin-left: 14px; }
+.demo-nav a:hover { color: #ffb347; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+<div class="demo-nav"><a href="parallax.html">parallax</a><a href="multithreaded-fox.html">multithreaded fox</a></div>
 <script>
 const cv = document.getElementById('c');
 const ctx = cv.getContext('2d');

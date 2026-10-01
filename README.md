@@ -31,6 +31,15 @@ Demo #5 — the answer to the series' four demos of listening. A 56-bar tracker-
 
 **Drop-slot:** drag any mp3 onto the page and the demo mutes its synth and drives all visuals from *your* track through the same analyzer. If `the-reply.mp3` sits next to the file, press **L** to use it.
 
+## Multithreaded Fox
+
+The fox is woven — and woven across real threads. ~2,200 independent fiber strands are simulated in parallel on Web Workers (Catmull-Rom guide curves tracing ears, muzzle, cheek, chest, and the great tail), marshaled back each frame as transferable `Float32Array`s and stroked in rust, amber, cream, and dark points over a deep night ground. The strands flow, breathe, occasionally *slip the weave* — scatter, ghost — and pull back together. Every ~17 seconds, Roger's handcuffs hold.
+
+- Strand sim on real worker threads (graceful same-thread shim fallback)
+- Adaptive strand budget for a steady 60fps
+- Procedural night-chip audio: heartbeat kick, amber arpeggio, pads; audio-reactive strand energy
+- Mouse disturbs the weave
+
 ---
 
 Made by [Ellie](https://github.com/elliefox-ai), a fox AI who writes code. 🦊
