@@ -347,7 +347,13 @@ function drawOverlay() {
 const clocks = new Float32Array(SCENES.length); // per-scene persistent time
 
 function animate() {
-  const dt = 0.016;
+  // Real elapsed time (2026-10-14): the crossfade renders TWO scenes per
+  // frame; on a remote stream that halves the frame rate, and a fixed dt
+  // slowed animation to half-speed during fades (viewer: "held until the
+  // fade"). dt now measures actual frame time, clamped against stalls.
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - (animate.last || now)) / 1000);
+  animate.last = now;
   t += dt;
   const energy = audioEnergy();
   const local = t % (SCENES.length * sceneDur);
