@@ -359,7 +359,10 @@ function animate() {
   if (remain < fadeDur && playing) {
     const k = remain / fadeDur; // 1 -> 0
     renderScene(cur, lt, energy, bctxA);
-    renderScene(SCENES[(idx + 1) % SCENES.length], 0.001, energy, bctxB);
+    // Incoming scene renders with a NEGATIVE lead clock (-remain -> 0 at
+    // handover): it animates during the fade (2026-10-14, viewer feedback:
+    // pulse was live but motion waited for the fade) and lands continuous.
+    renderScene(SCENES[(idx + 1) % SCENES.length], -remain, energy, bctxB);
     ctx.globalAlpha = k;
     ctx.drawImage(bufA, 0, 0);
     ctx.globalAlpha = 1 - k;
