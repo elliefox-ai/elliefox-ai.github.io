@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELLIE FOX :: WIREFRAME</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100%; height: 100%; }
+.demo-nav { position: fixed; right: 12px; bottom: 10px; z-index: 50; font-family: monospace; font-size: 12px; }
+.demo-nav a { color: rgba(200,220,220,0.35); text-decoration: none; margin-left: 14px; }
+.demo-nav a:hover { color: #ffb347; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="demo-nav"><a href="index.html">first contact</a><a href="parallax.html">parallax</a><a href="multithreaded-fox.html">multithreaded fox</a></div>
+<script>
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W, H, t = 0;
+
+// Two offscreen buffers for crossfade
+const bufA = document.createElement('canvas');
+const bufB = document.createElement('canvas');
+const bctxA = bufA.getContext('2d');
+const bctxB = bufB.getContext('2d');
+
+function resize() {
+  W = cv.width = window.innerWidth;
+  H = cv.height = window.innerHeight;
+  bufA.width = bufB.width = W;
+  bufA.height = bufB.height = H;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ---------- Audio: house chiptune + analyser ----------
+let audioCtx, analyser, freqData, playing = false, master;
+const bpm = 128;
+const stepMs = 60000 / bpm / 4; // 16th notes
+
+function initAudio() {
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  master = audioCtx.createGain();
+  master.gain.value = 0.9;
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 256;
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  master.connect(analyser).connect(audioCtx.destination);
+}
+
+function kick(time) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.frequency.setValueAtTime(150, time);
+  osc.frequency.exponentialRampToValueAtTime(0.01, time + 0.4);
+  gain.gain.setValueAtTime(0.7, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.4);
+  osc.connect(gain).connect(master);
+  osc.start(time); osc.stop(time + 0.4);
+}
+
+function hat(time) {
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.05, audioCtx.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
+  const noise = audioCtx.createBufferSource();
+  noise.buffer = buf;
+  const hp = audioCtx.createBiquadFilter();
+  hp.type = 'highpass'; hp.frequency.value = 7000;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.15, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.05);
+  noise.connect(hp).connect(gain).connect(master);
+  noise.start(time);
+}
+
+function bass(time, freq) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'sawtooth';
+  osc.frequency.value = freq;
+  const filter = audioCtx.createBiquadFilter();
+  filter.type = 'lowpass';
+  filter.frequency.setValueAtTime(900, time);
+  filter.frequency.exponentialRampToValueAtTime(120, time + 0.2);
+  gain.gain.setValueAtTime(0.25, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.2);
+  osc.connect(filter).connect(gain).connect(master);
+  osc.start(time); osc.stop(time + 0.2);
+}
+
+function lead(time, freq) {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'square';
+  osc.frequency.value = freq;
+  gain.gain.setValueAtTime(0.08, time);
+  gain.gain.exponentialRampToValueAtTime(0.001, time + 0.15);
+  osc.connect(gain).connect(master);
+  osc.start(time); osc.stop(time + 0.15);
+}
+
+const bassLine = [55, 0, 55, 0, 0, 55, 0, 55, 49, 0, 49, 0, 0, 49, 0, 0,
+                  41, 0, 41, 0, 0, 41, 0, 0, 73, 0, 73, 0, 65, 0, 49, 0];
+const leadLine = [0, 0, 220, 0, 0, 261, 0, 0, 329, 0, 0, 261, 0, 0, 220, 0,
+                  0, 196, 0, 261, 0, 0, 329, 0, 392, 0, 0, 329, 0, 261, 0, 0];
+
+let step = 0, nextStepTime = 0;
+function scheduler() {
+  if (!playing) return;
+  while (nextStepTime < audioCtx.currentTime + 0.1) {
+    const s = step % 32;
+    if (s % 4 === 0) kick(nextStepTime);
+    if (s % 2 === 1) hat(nextStepTime);
+    if (bassLine[s]) bass(nextStepTime, bassLine[s]);
+    if (step >= 16 && leadLine[s]) lead(nextStepTime, leadLine[s]);
+    nextStepTime += stepMs / 1000;
+    step++;
+  }
+}
+
+function audioEnergy() {
+  if (!analyser) return 0;
+  analyser.getByteFrequencyData(freqData);
+  let sum = 0;
+  for (let i = 0; i < 16; i++) sum += freqData[i];
+  return sum / (16 * 255);
+}
+
+// ---------- Wireframe math ----------
+function rotX(p, a) { const c = Math.cos(a), s = Math.sin(a); return [p[0], p[1]*c - p[2]*s, p[1]*s + p[2]*c]; }
+function rotY(p, a) { const c = Math.cos(a), s = Math.sin(a); return [p[0]*c + p[2]*s, p[1], -p[0]*s + p[2]*c]; }
+function rotZ(p, a) { const c = Math.cos(a), s = Math.sin(a); return [p[0]*c - p[1]*s, p[0]*s + p[1]*c, p[2]]; }
+
+function project(p, fov, cx, cy) {
+  const z = p[2] + 4; // camera distance
+  if (z <= 0.05) return null;
+  const s = fov / z;
+  return [cx + p[0] * s, cy + p[1] * s, z];
+}
+
+// Depth-shaded edge draw: near = bright cyan-white, far = deep blue
+function edge(a, b, cx, cy, fov, energy) {
+  const pa = project(a, fov, cx, cy), pb = project(b, fov, cx, cy);
+  if (!pa || !pb) return;
+  const z = (pa[2] + pb[2]) / 2;
+  const d = Math.max(0, Math.min(1, 1.6 - z / 3.2));
+  const alpha = 0.15 + d * 0.85;
+  const r = Math.floor(90 + d * 165 * (0.6 + energy * 0.6));
+  const g = Math.floor(180 + d * 75);
+  g2d.strokeStyle = `rgba(${Math.min(r,255)},${g},255,${alpha})`;
+  g2d.lineWidth = 0.6 + d * 1.6;
+  g2d.beginPath();
+  g2d.moveTo(pa[0], pa[1]);
+  g2d.lineTo(pb[0], pb[1]);
+  g2d.stroke();
+}
+
+let g2d; // current draw target (buffer ctx)
+
+// ---------- Geometry ----------
+function icosahedron() {
+  const phi = (1 + Math.sqrt(5)) / 2;
+  const V = [];
+  for (let s1 of [-1, 1]) for (let s2 of [-1, 1]) {
+    V.push([0, s1, s2 * phi], [s1, s2 * phi, 0], [s2 * phi, 0, s1]);
+  }
+  const E = [];
+  for (let i = 0; i < V.length; i++) for (let j = i + 1; j < V.length; j++) {
+    const dx = V[i][0]-V[j][0], dy = V[i][1]-V[j][1], dz = V[i][2]-V[j][2];
+    const d2 = dx*dx + dy*dy + dz*dz;
+    if (Math.abs(d2 - 4) < 0.01) E.push([i, j]); // edge length 2 (phi normalized)
+  }
+  return { V: V.map(p => { const l = Math.hypot(...p); return p.map(c => c / l); }), E };
+}
+const ICO = icosahedron();
+
+function cubeGrid(n, cell) {
+  const V = [], E = [];
+  for (let i = 0; i < n; i++) {
+    const x = (i % 3 - 1) * cell, y = (Math.floor(i / 3) % 3 - 1) * cell, z = (Math.floor(i / 9) - 1) * cell;
+    const h = cell * 0.42;
+    const base = V.length;
+    V.push([x-h,y-h,z-h],[x+h,y-h,z-h],[x+h,y+h,z-h],[x-h,y+h,z-h],
+           [x-h,y-h,z+h],[x+h,y-h,z+h],[x+h,y+h,z+h],[x-h,y+h,z+h]);
+    for (const [a,b] of [[0,1],[1,2],[2,3],[3,0],[4,5],[5,6],[6,7],[7,4],[0,4],[1,5],[2,6],[3,7]]) E.push([base+a, base+b]);
+  }
+  return { V, E };
+}
+const GRID = cubeGrid(27, 1.15);
+
+// ---------- Scenes ----------
+function sceneIcosa(lt, energy) {
+  const cx = W / 2, cy = H / 2, fov = Math.min(W, H) * 0.9;
+  const scale = 1.1 + energy * 0.25;
+  const spin = lt * 0.7;
+  const wob = Math.sin(lt * 1.3) * 0.4;
+  const V = ICO.V.map(p => rotY(rotX(rotZ(p, spin * 0.6), spin), wob));
+  for (const [a, b] of ICO.E) edge(V[a].map(c => c * scale), V[b].map(c => c * scale), cx, cy, fov, energy);
+  // inner echo: shrunk, dimmer
+  const Vi = V.map(p => p.map(c => c * 0.45));
+  g2d.globalAlpha = 0.4;
+  for (const [a, b] of ICO.E) edge(Vi[a], Vi[b], cx, cy, fov, energy * 0.5);
+  g2d.globalAlpha = 1;
+}
+
+function sceneTerrain(lt, energy) {
+  // Classic wireframe landscape flythrough, column strips toward horizon
+  const cx = W / 2, horizon = H * 0.42;
+  const rows = 22, cols = 24;
+  const speed = lt * 1.4;
+  const h = (i, j) => {
+    const z = ((i / rows) + speed) % 1;
+    const zz = z * 10 - 5;
+    const x = j / cols - 0.5;
+    return Math.sin(x * 5 + speed * 2) * 0.5 + Math.sin(zz * 1.2 + speed) * Math.cos(x * 3) * 0.8;
+  };
+  const fov = Math.min(W, H) * 0.9;
+  const pts = [];
+  for (let i = 0; i <= rows; i++) {
+    const zpos = ((i / rows) + speed) % 1;
+    const z = zpos * 9 - 4.5;
+    for (let j = 0; j <= cols; j++) {
+      const x = (j / cols - 0.5) * 5;
+      const y = -1.2 - h(i, j) * (0.5 + energy * 0.3);
+      const p = project([x, y, z], fov, cx, H * 0.55);
+      pts.push(p);
+    }
+  }
+  for (let i = 0; i <= rows; i++) {
+    for (let j = 0; j <= cols; j++) {
+      const idx = i * (cols + 1) + j;
+      const p = pts[idx];
+      if (!p) continue;
+      const z = p[2];
+      const d = Math.max(0, Math.min(1, 1.8 - z / 2.6));
+      if (d < 0.02) continue;
+      const alpha = d * 0.9;
+      const near = Math.floor(120 + d * 135);
+      g2d.strokeStyle = `rgba(${Math.floor(near*0.5)},${near},255,${alpha})`;
+      g2d.lineWidth = 0.5 + d * 1.2;
+      g2d.beginPath();
+      g2d.moveTo(p[0], p[1]);
+      const right = pts[idx + 1];
+      const down = pts[idx + cols + 1];
+      if (j < cols && right) g2d.lineTo(right[0], right[1]);
+      g2d.stroke();
+      if (i < rows && down) {
+        g2d.beginPath();
+        g2d.moveTo(p[0], p[1]);
+        g2d.lineTo(down[0], down[1]);
+        g2d.stroke();
+      }
+    }
+  }
+}
+
+function sceneCubeTunnel(lt, energy) {
+  const cx = W / 2, cy = H / 2, fov = Math.min(W, H) * 0.9;
+  const N = 8;
+  for (let i = 0; i < N; i++) {
+    const z = ((i / N + lt * 0.22) % 1) * 12 - 5;
+    const scale = 0.35;
+    const ang = lt * 0.5 + i * 0.7;
+    const orbit = 0.9 + Math.sin(lt * 1.7 + i) * 0.15 + energy * 0.2;
+    const ox = Math.cos(ang) * orbit, oy = Math.sin(ang * 1.3) * orbit;
+    const V = [];
+    const h = scale;
+    for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1])
+      V.push([ox + sx*h, oy + sy*h, z + sz*h]);
+    const pairs = [[0,1],[0,2],[0,4],[1,3],[1,5],[2,3],[2,6],[3,7],[4,5],[4,6],[5,7],[6,7]];
+    for (const [a, b] of pairs) {
+      const pa = project(V[a], fov, cx, cy), pb = project(V[b], fov, cx, cy);
+      if (!pa || !pb) continue;
+      const d = Math.max(0, Math.min(1, 1.5 - z / 4));
+      const alpha = d * 0.9;
+      const hue = Math.floor(140 + d * 100 + energy * 60);
+      g2d.strokeStyle = `rgba(${Math.floor(hue*0.55)},${hue},255,${alpha})`;
+      g2d.lineWidth = 0.6 + d * 1.4;
+      g2d.beginPath();
+      g2d.moveTo(pa[0], pa[1]); g2d.lineTo(pb[0], pb[1]);
+      g2d.stroke();
+    }
+  }
+}
+
+function sceneMorphGreets(lt, energy) {
+  const cx = W / 2, cy = H / 2, fov = Math.min(W, H) * 0.9;
+  // Morph icosahedron -> cube frame and back over 6s
+  const phase = (Math.sin(lt * Math.PI / 3) + 1) / 2; // 0..1..0
+  const cubeV = [];
+  const h = 0.85;
+  for (const sx of [-1, 1]) for (const sy of [-1, 1]) for (const sz of [-1, 1])
+    cubeV.push([sx*h, sy*h, sz*h]);
+  const cubeE = [[0,1],[0,2],[0,4],[1,3],[1,5],[2,3],[2,6],[3,7],[4,5],[4,6],[5,7],[6,7]];
+  const n = Math.min(ICO.E.length, cubeE.length);
+  const spin = lt * 0.5;
+  for (let k = 0; k < n; k++) {
+    const a = ICO.E[k], b = cubeE[k];
+    const ia = a[0] % 8, ib = b[0], ja = a[1] % 8, jb = b[1];
+    const mix = (u, v) => [u[0]*(1-phase)+v[0]*phase, u[1]*(1-phase)+v[1]*phase, u[2]*(1-phase)+v[2]*phase];
+    let p1 = mix(ICO.V[ia], cubeV[ib]).map(c => c * (1.2 + energy * 0.2));
+    let p2 = mix(ICO.V[ja], cubeV[jb]).map(c => c * (1.2 + energy * 0.2));
+    p1 = rotY(rotX(p1, spin * 0.4), spin);
+    p2 = rotY(rotX(p2, spin * 0.4), spin);
+    edge(p1, p2, cx, cy, fov, energy);
+  }
+  // Greets
+  ctx.font = `bold ${Math.min(W * 0.05, 44)}px monospace`;
+  ctx.textAlign = 'center';
+  const pulse = 0.5 + energy * 0.5;
+  ctx.shadowColor = '#64c8ff';
+  ctx.shadowBlur = 10 + pulse * 15;
+  ctx.fillStyle = `rgba(180, 230, 255, ${0.5 + pulse * 0.5})`;
+  ctx.fillText('WIREFRAME', W / 2, H * 0.82);
+  ctx.shadowBlur = 0;
+  ctx.font = `${Math.min(W * 0.025, 20)}px monospace`;
+  ctx.fillStyle = 'rgba(200, 200, 200, 0.55)';
+  ctx.fillText('greetings to the scene :: ellie 🦊', W / 2, H * 0.88);
+}
+
+const SCENES = [sceneIcosa, sceneTerrain, sceneCubeTunnel, sceneMorphGreets];
+const sceneDur = 14;
+const fadeDur = 2;
+
+function renderScene(fn, lt, energy, target) {
+  g2d = target;
+  g2d.fillStyle = '#000';
+  g2d.fillRect(0, 0, W, H);
+  fn(lt, energy);
+}
+
+function drawOverlay() {
+  const grad = ctx.createRadialGradient(W/2, H/2, Math.min(W,H)*0.3, W/2, H/2, Math.max(W,H)*0.7);
+  grad.addColorStop(0, 'rgba(0,0,0,0)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.4)');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
+  for (let y = 0; y < H; y += 2) ctx.fillRect(0, y, W, 1);
+}
+
+function animate() {
+  t += 0.016;
+  const energy = audioEnergy();
+  const local = t % (SCENES.length * sceneDur);
+  const idx = Math.floor(local / sceneDur);
+  const lt = local % sceneDur;
+  const cur = SCENES[idx];
+
+  // Crossfade near the end of a scene into the next
+  const remain = sceneDur - lt;
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, W, H);
+  if (remain < fadeDur && playing) {
+    const k = remain / fadeDur; // 1 -> 0
+    renderScene(cur, lt, energy, bctxA);
+    renderScene(SCENES[(idx + 1) % SCENES.length], 0.001, energy, bctxB);
+    ctx.globalAlpha = k;
+    ctx.drawImage(bufA, 0, 0);
+    ctx.globalAlpha = 1 - k;
+    ctx.drawImage(bufB, 0, 0);
+    ctx.globalAlpha = 1;
+  } else {
+    renderScene(cur, lt, energy, bctxA);
+    ctx.drawImage(bufA, 0, 0);
+  }
+  drawOverlay();
+  requestAnimationFrame(animate);
+}
+
+// Click to start
+const overlay = document.createElement('div');
+overlay.style.cssText = `
+  position:fixed; inset:0; background:#000; color:#fff;
+  display:flex; align-items:center; justify-content:center;
+  font-family:monospace; font-size:24px; cursor:pointer;
+  z-index:100; text-align:center;
+`;
+overlay.innerHTML = '▶ CLICK TO START<br><span style="font-size:14px;opacity:0.6">ellie fox :: wireframe</span>';
+overlay.onclick = () => {
+  initAudio();
+  playing = true;
+  nextStepTime = audioCtx.currentTime + 0.05;
+  step = 0;
+  setInterval(scheduler, 25);
+  overlay.remove();
+  animate();
+};
+document.body.appendChild(overlay);
+</script>
+</body>
+</html>
