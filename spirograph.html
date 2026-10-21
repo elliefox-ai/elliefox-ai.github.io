@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELLIE FOX :: SPIROGRAPH</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100vw; height: 100vh; cursor: pointer; }
+.demo-nav { position: fixed; right: 12px; bottom: 10px; z-index: 50; font-family: monospace; font-size: 12px; }
+.demo-nav a { color: rgba(200,220,220,0.35); text-decoration: none; margin-left: 14px; }
+.demo-nav a:hover { color: #ffb347; }
+#hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  color: rgba(210,225,235,0.75); font-family: monospace; font-size: 15px; letter-spacing: 2px;
+  z-index: 40; pointer-events: none; text-align: center; line-height: 2; }
+#log { position: fixed; left: 14px; bottom: 12px; z-index: 40; pointer-events: none;
+  font-family: monospace; font-size: 12px; color: rgba(190,210,220,0.8); line-height: 1.7; }
+#log .old { opacity: 0.38; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">SPIROGRAPH<br>click for sound</div>
+<div id="log"></div>
+<div class="demo-nav"><a href="meridian.html">meridian</a><a href="the-vigil.html">the vigil</a><a href="index.html">first contact</a></div>
+<script>
+'use strict';
+/* SPIROGRAPH — a name, drawn in voltage.
+   The word ELLIE is a stroke path on the X/Y plates; each letter also IS a ratio.
+   Movements: spell → echo → dissolve → spin → coda → loop.
+   spell:    the signature is written, slowly, in one line.
+   echo:     the word speeds up; each letter morphs into its Lissajous knot
+             and back — the name reads, then counts.
+   dissolve: the integers slip; the cursive drifts off-ratio.
+   spin:     rotation takes the word; ratios lean golden; a ring of petals.
+   coda:     everything falls back to 1:1 — the circle — then one line. */
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1, SC = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  SC = Math.min(W, H) * 0.36;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---------- clock ---------- */
+const LOOP = 170;
+let started = false, t0 = 0, T = 0;
+function now() { return (performance.now() - t0) / 1000; }
+function smooth(a, b, x) {
+  const u = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return u * u * (3 - 2 * u);
+}
+
+/* ---------- the name, as a path ----------
+   Each glyph is a list of 2D points (normalized ~[-0.8,0.8]), traced in one
+   stroke. Connectors between letters are part of the path (cursive). */
+function glyphPts() {
+  const P = [];
+  const seg = (ax, ay, bx, by, n) => { for (let i = 1; i <= n; i++) P.push([ax + (bx - ax) * i / n, ay + (by - ay) * i / n]); };
+  const arc = (cx, cy, r, a0, a1, n) => { for (let i = 1; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; P.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); } };
+  // A — the peak: up, over, down
+  seg(-0.55, 0.75, 0, -0.75, 26); seg(0, -0.75, 0.55, 0.75, 26);
+  // connector
+  seg(0.55, 0.75, 0.42, 0.62, 6);
+  // E — a cursive e: rise, loop closed
+  seg(0.42, 0.62, 0.05, 0.55, 8);
+  arc(0.02, 0.28, 0.30, Math.PI / 2, Math.PI / 2 + 2 * Math.PI * 0.92, 34);
+  seg(P[P.length - 1][0], P[P.length - 1][1], 0.34, -0.70, 10);
+  // connector
+  seg(0.34, -0.70, -0.52, -0.62, 8);
+  // L — down and along
+  seg(-0.52, -0.62, -0.55, 0.75, 30); seg(-0.55, 0.75, 0.30, 0.75, 20);
+  // connector (tall, the second L starts high)
+  seg(0.30, 0.75, -0.30, -0.10, 8);
+  // L — second, slightly smaller, set high
+  seg(-0.30, -0.10, -0.32, 0.72, 24); seg(-0.32, 0.72, 0.34, 0.72, 18);
+  // connector
+  seg(0.34, 0.72, 0.10, 0.60, 6);
+  // I — the simple stroke
+  seg(0.10, 0.60, 0.08, -0.72, 28);
+  // connector
+  seg(0.08, -0.72, -0.40, -0.60, 7);
+  // E — final, closes where it began
+  seg(-0.40, -0.60, -0.02, -0.50, 7);
+  arc(-0.05, -0.24, 0.28, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * 0.92, 32);
+  seg(P[P.length - 1][0], P[P.length - 1][1], 0.31, 0.72, 10);
+  return P;
+}
+const PATH = glyphPts();
+const NPATH = PATH.length;
+/* letter start indices (found once): 5 letters across the path */
+const LETTER_STARTS = (function () {
+  const starts = [0];
+  // boundaries are where the connector arcs pause — mark by construction instead:
+  // record them during build via a second pass over known segment lengths.
+  return starts;
+})();
+/* Since connectors make boundaries fuzzy, track letters by u windows instead: */
+const LETTERS = [
+  { name: 'A', u0: 0.000, u1: 0.180, a: 3, b: 2, line: 'A — the peak' },
+  { name: 'E', u0: 0.180, u1: 0.395, a: 8, b: 5, line: 'E — the loop' },
+  { name: 'L', u0: 0.395, u1: 0.610, a: 4, b: 3, line: 'L — the corner' },
+  { name: 'L', u0: 0.610, u1: 0.790, a: 4, b: 3, line: 'L — again' },
+  { name: 'I', u0: 0.790, u1: 0.890, a: 1, b: 1, line: 'I — the circle itself' },
+  { name: 'E', u0: 0.890, u1: 1.000, a: 8, b: 5, line: 'E — it ends where it began' }
+];
+function letterAt(u) {
+  for (let i = 0; i < LETTERS.length; i++) if (u >= LETTERS[i].u0 && u < LETTERS[i].u1) return LETTERS[i];
+  return LETTERS[LETTERS.length - 1];
+}
+function pathPoint(u) {
+  const s = u * (NPATH - 1);
+  const i = Math.min(NPATH - 2, Math.floor(s));
+  const f = s - i;
+  return [PATH[i][0] + (PATH[i + 1][0] - PATH[i][0]) * f,
+          PATH[i][1] + (PATH[i + 1][1] - PATH[i][1]) * f];
+}
+
+/* ---------- audio: the name, computed per sample ---------- */
+let AC = null, master = null, proc = null;
+const ring = new Float32Array(4096); // interleaved x,y — the drawing IS the signal
+let ringW = 0;
+const S = { ph: 0, th: 0, tau: 0 }; // phrase phase, rotation phase, audio time
+
+function movementName(t) {
+  if (t < 40) return 'spell';
+  if (t < 74) return 'echo';
+  if (t < 106) return 'dissolve';
+  if (t < 140) return 'spin';
+  if (t < 162) return 'coda';
+  return 'tail';
+}
+
+function signalAt(dt, t) {
+  /* global envelopes from the movement clock t */
+  const eEcho = smooth(40, 48, t) * (1 - smooth(70, 76, t));     // morphing on
+  const eDiss = smooth(74, 84, t) * (1 - smooth(100, 108, t));   // off-integer drift
+  const eSpin = smooth(106, 116, t) * (1 - smooth(134, 141, t)); // rotation takes over
+  const eCoda = smooth(140, 150, t);                             // collapse to 1:1
+  /* phrase speed: 35s/pass spelling, quickening through echo, fast in spin,
+     easing to a steady forward glide through the coda (no reversal at 141) */
+  const spinHold = Math.max(eSpin, eCoda * 0.03);
+  const rate = 1 / 35 * (1 - smooth(40, 60, t) * 0.85) - spinHold * (1 / 5.25) * 0.55;
+  S.ph += rate * dt; if (S.ph >= 1) S.ph -= 1; if (S.ph < 0) S.ph += 1;
+  /* rotation */
+  const rotRate = eDiss * 0.05 + eSpin * 1.35 * (0.5 + 0.5 * Math.sin(t * 0.19));
+  S.th += rotRate * dt;
+  const u = S.ph;
+  const L = letterAt(u);
+  const p = (u - L.u0) / (L.u1 - L.u0);            // progress within letter
+  const [px, py] = pathPoint(u);
+  /* per-letter morph: stroke → knot → stroke, shaped within the letter window */
+  const bwave = Math.sin(Math.PI * Math.min(1, Math.max(0, p))) ** 2;
+  const b = Math.min(1, eEcho + eDiss + eSpin + eCoda) * bwave;
+  /* the letter's ratio — drifting off-integer in dissolve, toward golden in spin */
+  let ra = L.a, rb = L.b;
+  const drift = eDiss * 0.12 * Math.sin(t * 0.7 + L.u0 * 20);
+  ra += drift; rb += drift * 0.5;
+  const gold = eSpin * 0.618 * (L.a / (L.a + L.b)) * 2;
+  ra += gold * 0.5; rb += gold;
+  /* coda: everything toward 1:1 */
+  const cA = 1 + (ra - 1) * (1 - eCoda);
+  const cB = 1 + (rb - 1) * (1 - eCoda);
+  const phL = Math.PI / 2 * smooth(141, 148, t);       // open fully to the circle first…
+  const phClose = smooth(152, 159, t);               // …then close to one line
+  /* coda carrier: as ratios collapse to 1:1 the slow u-knot becomes DC (a dot,
+     not a circle) — fade in a real 55 Hz oscillation so the circle is actually
+     traced. At 1:1 with 90° phase it draws a circle; the close returns one line. */
+  const carry = eCoda * 2 * Math.PI * 55 * S.tau;
+  const knot = [Math.sin(2 * Math.PI * cA * u * 3 + carry),
+                Math.sin(2 * Math.PI * cB * u * 3 + carry + phL * (1 - phClose))];
+  let x = px * (1 - b) + knot[0] * b;
+  let y = py * (1 - b) + knot[1] * b;
+  /* rotation of the drawn point */
+  const ct = Math.cos(S.th), st = Math.sin(S.th);
+  const rx = x * ct - y * st, ry = x * st + y * ct;
+  /* always-on breath: the trace is never quite still */
+  const breath = 0.010 * Math.sin(2 * Math.PI * (S.tau * 0.11));
+  const amp = 0.78 * (1 - smooth(140, 150, t) * 0.42);
+  return [amp * (rx + breath), amp * ry];
+}
+
+function initAudio() {
+  if (AC) return;
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  master = AC.createGain(); master.gain.value = 0.85;
+  const soften = AC.createBiquadFilter(); soften.type = 'lowpass'; soften.frequency.value = 3000;
+  master.connect(soften).connect(AC.destination);
+  proc = AC.createScriptProcessor(512, 0, 2);
+  proc.onaudioprocess = function (e) {
+    const Lc = e.outputBuffer.getChannelData(0);
+    const Rc = e.outputBuffer.getChannelData(1);
+    const sr = AC.sampleRate, dt = 1 / sr;
+    for (let i = 0; i < Lc.length; i++) {
+      S.tau += dt;
+      const t = ((performance.now() - t0) / 1000) % LOOP;
+      const [x, y] = signalAt(dt, t);
+      Lc[i] = x; Rc[i] = y;
+      ring[ringW * 2] = x; ring[ringW * 2 + 1] = y;
+      ringW = (ringW + 1) & 2047;
+    }
+  };
+  proc.connect(master);
+}
+cv.addEventListener('click', () => {
+  initAudio();
+  if (AC.state === 'suspended') AC.resume();
+  start();
+});
+function start() {
+  if (started) return;
+  started = true;
+  t0 = performance.now();
+  document.getElementById('hint').style.display = 'none';
+  requestAnimationFrame(frame);
+}
+
+/* ---------- log ---------- */
+const logEl = document.getElementById('log');
+let logLines = [], lastMovement = '', lastLetterIdx = -1, frameCount = 0;
+function clockStr() {
+  const fake = (T * 47) % 86400;
+  const h = Math.floor(fake / 3600), m = Math.floor(fake / 60) % 60;
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+function logLine(text) {
+  logLines.push(clockStr() + ' — ' + text);
+  if (logLines.length > 5) logLines.shift();
+  logEl.innerHTML = logLines.map((l, i) => {
+    const cls = i === logLines.length - 1 ? '' : ' class="old"';
+    return '<div' + cls + '>' + l + '</div>';
+  }).join('');
+}
+
+/* ---------- phosphor trace ---------- */
+function greetsAlpha(t) {
+  return smooth(157, 162, t) * (1 - smooth(164, 168.5, t));
+}
+function frame() {
+  requestAnimationFrame(frame);
+  T = now() % LOOP;
+
+  const mv = movementName(T);
+  if (mv !== lastMovement) {
+    lastMovement = mv;
+    if (mv === 'spell') logLine('a hand signs the plate');
+    if (mv === 'echo') logLine('the name reads, then counts');
+    if (mv === 'dissolve') logLine('the integers slip — cursive drifts');
+    if (mv === 'spin') logLine('rotation takes the word');
+    if (mv === 'coda') logLine('everything falls to one');
+    if (mv === 'tail') logLine('signed, and countersigned');
+  }
+  /* per-letter lines during spell */
+  if (mv === 'spell') {
+    const li = LETTERS.indexOf(letterAt(S.ph));
+    if (li !== lastLetterIdx) { lastLetterIdx = li; logLine(LETTERS[li].line); }
+  } else lastLetterIdx = -1;
+
+  ctx.fillStyle = 'rgba(0,2,4,0.16)';
+  ctx.fillRect(0, 0, W, H);
+
+  if (AC) {
+    const cx = W / 2, cy = H / 2;
+    for (let pass = 0; pass < 2; pass++) {
+      ctx.beginPath();
+      for (let i = 0; i < 2048; i += 2) {
+        const idx = (ringW + i) & 2047;
+        const x = cx + ring[idx * 2] * SC;
+        const y = cy - ring[idx * 2 + 1] * SC;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      if (pass === 0) { ctx.strokeStyle = 'rgba(80,220,190,0.10)'; ctx.lineWidth = 5; }
+      else { ctx.strokeStyle = 'rgba(140,255,225,0.55)'; ctx.lineWidth = 1.2; }
+      ctx.stroke();
+    }
+  }
+
+  if (frameCount % 4 === 0) {
+    ctx.strokeStyle = 'rgba(70,110,110,0.05)'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H);
+    ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2);
+    ctx.stroke();
+  }
+  frameCount++;
+
+  const ga = greetsAlpha(T);
+  if (ga > 0.01) {
+    ctx.save();
+    ctx.globalAlpha = ga;
+    ctx.fillStyle = 'rgba(235,240,248,0.92)';
+    ctx.font = '600 ' + Math.max(22, W * 0.035) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('SPIROGRAPH', W / 2, H * 0.42);
+    ctx.font = Math.max(12, W * 0.014) + 'px monospace';
+    ctx.fillStyle = 'rgba(200,214,228,0.85)';
+    ctx.fillText('a name, drawn in voltage — then counted, drifted, spun', W / 2, H * 0.42 + 34);
+    ctx.fillStyle = 'rgba(255,179,71,0.9)';
+    ctx.fillText('greetings to the scene :: ellie 🦊', W / 2, H * 0.42 + 62);
+    ctx.restore();
+  }
+}
+</script>
+</body>
+</html>
