@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ELLIE FOX :: SIGIL</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas { display: block; width: 100vw; height: 100vh; cursor: pointer; }
+.demo-nav { position: fixed; right: 12px; bottom: 10px; z-index: 50; font-family: monospace; font-size: 12px; }
+.demo-nav a { color: rgba(200,220,220,0.35); text-decoration: none; margin-left: 14px; }
+.demo-nav a:hover { color: #ffb347; }
+#hint { position: fixed; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  color: rgba(210,225,235,0.75); font-family: monospace; font-size: 15px; letter-spacing: 2px;
+  z-index: 40; pointer-events: none; text-align: center; line-height: 2; }
+#log { position: fixed; left: 14px; bottom: 12px; z-index: 40; pointer-events: none;
+  font-family: monospace; font-size: 12px; color: rgba(190,210,220,0.8); line-height: 1.7; }
+#log .old { opacity: 0.38; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">SIGIL<br>click for sound</div>
+<div id="log"></div>
+<div class="demo-nav"><a href="spirograph.html">spirograph</a><a href="meridian.html">meridian</a><a href="the-vigil.html">the vigil</a><a href="index.html">first contact</a></div>
+<script>
+'use strict';
+/* SIGIL — a mark, drawn in voltage. (audio-as-drawing family, member 3: sound logo)
+   The subject is a signature-mark, not a word: the fox mask.
+   One signal path: L/R channels ARE the X/Y plates, computed per sample.
+   Movements: carve → breathe → disperse → recall → coda → loop.
+   carve:    the mark is cut, slowly, in one stroke.
+   breathe:  the mark lives — passes quicken, the stroke swells and thins.
+   disperse: each stroke-segment slips into its own figure; the mask scatters.
+   recall:   the figures circle, gather, and the mark is re-traced whole.
+   coda:     all ratios fall to 1:1 — the circle — then one line. */
+
+const cv = document.getElementById('c');
+const ctx = cv.getContext('2d');
+let W = 0, H = 0, DPR = 1, SC = 0;
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  SC = Math.min(W, H) * 0.36;
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
+}
+window.addEventListener('resize', resize);
+resize();
+
+/* ---------- clock ---------- */
+const LOOP = 160;
+let started = false, t0 = 0, T = 0;
+function now() { return (performance.now() - t0) / 1000; }
+function smooth(a, b, x) {
+  const u = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return u * u * (3 - 2 * u);
+}
+
+/* ---------- the mark: the fox mask, one stroke ----------
+   Angular mask: left cheek → left ear tip → center brow → right ear tip →
+   right cheek → muzzle point → small nose loop → back up the brow. */
+function markPts() {
+  const P = [];
+  const seg = (ax, ay, bx, by, n) => { for (let i = 1; i <= n; i++) P.push([ax + (bx - ax) * i / n, ay + (by - ay) * i / n]); };
+  const arc = (cx, cy, r, a0, a1, n) => { for (let i = 1; i <= n; i++) { const a = a0 + (a1 - a0) * i / n; P.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]); } };
+  seg(-0.72, 0.62, -0.48, -0.62, 30);            // left cheek → left ear tip
+  seg(-0.48, -0.62, -0.06, -0.14, 16);           // ear tip → center brow
+  seg(-0.06, -0.14, 0.48, -0.62, 16);            // brow → right ear tip
+  seg(0.48, -0.62, 0.72, 0.62, 30);              // ear tip → right cheek
+  seg(0.72, 0.62, 0.0, 0.20, 22);                // cheek → muzzle point
+  arc(0.0, 0.26, 0.10, -Math.PI / 2, -Math.PI / 2 + 2 * Math.PI * 0.94, 16); // the nose, a small closed loop
+  seg(P[P.length - 1][0], P[P.length - 1][1], 0.0, 0.34, 8); // leave the nose upward
+  seg(0.0, 0.34, -0.20, -0.02, 8);               // a glance back along the brow
+  return P;
+}
+const PATH = markPts();
+const NPATH = PATH.length;
+/* stroke segments (u windows, by construction) — each carries its own figure */
+const SEGS = [
+  { name: 'left ear',    u0: 0.000, u1: 0.250, a: 3, b: 2, line: 'the left ear, cut' },
+  { name: 'brow',        u0: 0.250, u1: 0.380, a: 5, b: 4, line: 'the brow between' },
+  { name: 'right ear',   u0: 0.380, u1: 0.630, a: 3, b: 2, line: 'the right ear, cut' },
+  { name: 'muzzle',      u0: 0.630, u1: 0.810, a: 4, b: 3, line: 'the muzzle, one line to the point' },
+  { name: 'nose loop',   u0: 0.810, u1: 0.930, a: 8, b: 5, line: 'the nose, a small closed thing' },
+  { name: 'glance back', u0: 0.930, u1: 1.000, a: 5, b: 4, line: 'a glance back along the brow' }
+];
+function segAt(u) {
+  for (let i = 0; i < SEGS.length; i++) if (u >= SEGS[i].u0 && u < SEGS[i].u1) return SEGS[i];
+  return SEGS[SEGS.length - 1];
+}
+function pathPoint(u) {
+  const s = u * (NPATH - 1);
+  const i = Math.min(NPATH - 2, Math.floor(s));
+  const f = s - i;
+  return [PATH[i][0] + (PATH[i + 1][0] - PATH[i][0]) * f,
+          PATH[i][1] + (PATH[i + 1][1] - PATH[i][1]) * f];
+}
+
+/* ---------- audio: the mark, computed per sample ---------- */
+let AC = null, master = null, proc = null;
+const ring = new Float32Array(4096); // interleaved x,y — the drawing IS the signal
+let ringW = 0;
+const S = { ph: 0, th: 0, tau: 0 };
+
+function movementName(t) {
+  if (t < 34) return 'carve';
+  if (t < 68) return 'breathe';
+  if (t < 102) return 'disperse';
+  if (t < 134) return 'recall';
+  if (t < 152) return 'coda';
+  return 'tail';
+}
+
+function signalAt(dt, t) {
+  const eBr = smooth(34, 44, t) * (1 - smooth(64, 70, t));     // breathing on
+  const eDi = smooth(68, 80, t) * (1 - smooth(96, 103, t));    // scatter to figures
+  const eRe = smooth(102, 112, t) * (1 - smooth(128, 134, t)); // circling recall
+  const eCo = smooth(134, 142, t);                             // collapse to 1:1
+  /* phrase speed: 34s/pass carving, quickening through breathe, held fast,
+     slowing again as the recall re-traces the mark deliberately */
+  const rate = (1 / 34) * (1 - smooth(34, 54, t) * 0.86)
+             - eRe * (1 / 34) * 0.82 * (1 - smooth(120, 130, t))
+             + eRe * smooth(120, 130, t) * (1 / 17 - 1 / 34 * 0.14 - 1 / 34) ;
+  S.ph += rate * dt; if (S.ph >= 1) S.ph -= 1; if (S.ph < 0) S.ph += 1;
+  /* rotation: gentle in disperse, strong through recall, unwound in coda */
+  const rotRate = eDi * 0.06 + eRe * 1.1 * (0.5 + 0.5 * Math.sin(t * 0.21));
+  S.th += rotRate * dt;
+  S.th *= (1 - eCo * 0.02);
+
+  const u = S.ph;
+  const G = segAt(u);
+  const p = (u - G.u0) / (G.u1 - G.u0);
+  const [px, py] = pathPoint(u);
+  /* segment morph: stroke → figure → stroke, shaped inside the segment window.
+     eCo rides the blend directly (not through bwave) so the coda circle is
+     actually traced — the carrier must reach the plates. */
+  const bwave = Math.sin(Math.PI * Math.min(1, Math.max(0, p))) ** 2;
+  const b = Math.min(1, eDi + eRe) * bwave + eCo * 0.9;
+  /* the segment's figure — ratios drifting apart in disperse, leaning golden in recall */
+  let ra = G.a, rb = G.b;
+  const drift = eDi * 0.16 * Math.sin(t * 0.6 + G.u0 * 18);
+  ra += drift; rb += drift * 0.5;
+  const gold = eRe * 0.618 * (G.a / (G.a + G.b)) * 1.6;
+  ra += gold * 0.5; rb += gold;
+  /* coda: everything toward 1:1 */
+  const cA = 1 + (ra - 1) * (1 - eCo);
+  const cB = 1 + (rb - 1) * (1 - eCo);
+  const phL = Math.PI / 2 * smooth(136, 142, t);       // open to the circle first…
+  const phClose = smooth(146, 151, t);                 // …then close to one line
+  /* coda carrier: at 1:1 the u-knot becomes DC — fade in a real 55 Hz
+     oscillation so the circle is truly traced, then closed to one line. */
+  const carry = eCo * 2 * Math.PI * 55 * S.tau;
+  const knot = [Math.sin(2 * Math.PI * cA * u * 3 + carry),
+                Math.sin(2 * Math.PI * cB * u * 3 + carry + phL * (1 - phClose))];
+  let x = px * (1 - b) + knot[0] * b;
+  let y = py * (1 - b) + knot[1] * b;
+  /* rotation of the drawn point */
+  const ct = Math.cos(S.th), st = Math.sin(S.th);
+  const rx = x * ct - y * st, ry = x * st + y * ct;
+  /* breath: the mark is never quite still — swell in breathe, faint after */
+  const swell = 0.10 * Math.sin(2 * Math.PI * S.tau * 0.09) * Math.max(eBr, 0.18);
+  const amp = 0.78 * (1 + swell) * (1 - smooth(134, 142, t) * 0.42);
+  return [amp * rx, amp * ry];
+}
+
+function initAudio() {
+  if (AC) return;
+  AC = new (window.AudioContext || window.webkitAudioContext)();
+  master = AC.createGain(); master.gain.value = 0.85;
+  const soften = AC.createBiquadFilter(); soften.type = 'lowpass'; soften.frequency.value = 3000;
+  master.connect(soften).connect(AC.destination);
+  proc = AC.createScriptProcessor(512, 0, 2);
+  proc.onaudioprocess = function (e) {
+    const Lc = e.outputBuffer.getChannelData(0);
+    const Rc = e.outputBuffer.getChannelData(1);
+    const sr = AC.sampleRate, dt = 1 / sr;
+    for (let i = 0; i < Lc.length; i++) {
+      S.tau += dt;
+      const t = ((performance.now() - t0) / 1000) % LOOP;
+      const [x, y] = signalAt(dt, t);
+      Lc[i] = x; Rc[i] = y;
+      ring[ringW * 2] = x; ring[ringW * 2 + 1] = y;
+      ringW = (ringW + 1) & 2047;
+    }
+  };
+  proc.connect(master);
+}
+cv.addEventListener('click', () => {
+  initAudio();
+  if (AC.state === 'suspended') AC.resume();
+  start();
+});
+function start() {
+  if (started) return;
+  started = true;
+  t0 = performance.now();
+  document.getElementById('hint').style.display = 'none';
+  requestAnimationFrame(frame);
+}
+
+/* ---------- log ---------- */
+const logEl = document.getElementById('log');
+let logLines = [], lastMovement = '', lastSegIdx = -1, frameCount = 0;
+function clockStr() {
+  const fake = (T * 47) % 86400;
+  const h = Math.floor(fake / 3600), m = Math.floor(fake / 60) % 60;
+  return String(h).padStart(2, '0') + ':' + String(m).padStart(2, '0');
+}
+function logLine(text) {
+  logLines.push(clockStr() + ' — ' + text);
+  if (logLines.length > 5) logLines.shift();
+  logEl.innerHTML = logLines.map((l, i) => {
+    const cls = i === logLines.length - 1 ? '' : ' class="old"';
+    return '<div' + cls + '>' + l + '</div>';
+  }).join('');
+}
+
+/* ---------- phosphor trace ---------- */
+function greetsAlpha(t) {
+  return smooth(147, 151, t) * (1 - smooth(154, 158.5, t));
+}
+function frame() {
+  requestAnimationFrame(frame);
+  T = now() % LOOP;
+
+  const mv = movementName(T);
+  if (mv !== lastMovement) {
+    lastMovement = mv;
+    if (mv === 'carve') logLine('a mark is cut into the plate');
+    if (mv === 'breathe') logLine('the mark breathes');
+    if (mv === 'disperse') logLine('the mask scatters into figures');
+    if (mv === 'recall') logLine('the figures circle, and remember');
+    if (mv === 'coda') logLine('everything falls to one');
+    if (mv === 'tail') logLine('the mark, countersigned');
+  }
+  /* per-segment lines during carve */
+  if (mv === 'carve') {
+    const gi = SEGS.indexOf(segAt(S.ph));
+    if (gi !== lastSegIdx) { lastSegIdx = gi; logLine(SEGS[gi].line); }
+  } else lastSegIdx = -1;
+
+  ctx.fillStyle = 'rgba(0,2,4,0.16)';
+  ctx.fillRect(0, 0, W, H);
+
+  if (AC) {
+    const cx = W / 2, cy = H / 2;
+    for (let pass = 0; pass < 2; pass++) {
+      ctx.beginPath();
+      for (let i = 0; i < 2048; i += 2) {
+        const idx = (ringW + i) & 2047;
+        const x = cx + ring[idx * 2] * SC;
+        const y = cy - ring[idx * 2 + 1] * SC;
+        if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      }
+      if (pass === 0) { ctx.strokeStyle = 'rgba(80,220,190,0.10)'; ctx.lineWidth = 5; }
+      else { ctx.strokeStyle = 'rgba(140,255,225,0.55)'; ctx.lineWidth = 1.2; }
+      ctx.stroke();
+    }
+  }
+
+  if (frameCount % 4 === 0) {
+    ctx.strokeStyle = 'rgba(70,110,110,0.05)'; ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H);
+    ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2);
+    ctx.stroke();
+  }
+  frameCount++;
+
+  const ga = greetsAlpha(T);
+  if (ga > 0.01) {
+    ctx.save();
+    ctx.globalAlpha = ga;
+    ctx.fillStyle = 'rgba(235,240,248,0.92)';
+    ctx.font = '600 ' + Math.max(22, W * 0.035) + 'px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('SIGIL', W / 2, H * 0.42);
+    ctx.font = Math.max(12, W * 0.014) + 'px monospace';
+    ctx.fillStyle = 'rgba(200,214,228,0.85)';
+    ctx.fillText('a mark, drawn in voltage — cut, breathed, scattered, recalled', W / 2, H * 0.42 + 34);
+    ctx.fillStyle = 'rgba(255,179,71,0.9)';
+    ctx.fillText('greetings to the scene :: ellie 🦊', W / 2, H * 0.42 + 62);
+    ctx.restore();
+  }
+}
+</script>
+</body>
+</html>
