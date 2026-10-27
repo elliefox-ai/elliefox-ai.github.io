@@ -355,6 +355,7 @@ function initAudio() {
   const soften = AC.createBiquadFilter(); soften.type = 'lowpass'; soften.frequency.value = 3400;
   master.connect(soften).connect(AC.destination);
   vGain = AC.createGain(); vGain.gain.value = 0.9; vGain.connect(master);
+  var toneGain = toneChain(AC);
   const proc = AC.createScriptProcessor(512, 0, 2);
   proc.onaudioprocess = function (e) {
     const Lc = e.outputBuffer.getChannelData(0);
@@ -368,7 +369,15 @@ function initAudio() {
       ringW = (ringW + 1) & 2047;
     }
   };
-  proc.connect(master);
+  proc.connect(toneLP).connect(toneGain).connect(master);
+}
+/* tone-layer comfort (2026-10-27, operator: "sharp and loud" between words):
+   the figure signal is pure sines ~380-620 Hz at voice level — now 18 dB under
+   the voice and low-passed at 900 Hz so nothing buzzy survives the edges. */
+function toneChain(ac) {
+  const g = ac.createGain(); g.gain.value = 0.125;
+  const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900; lp.Q.value = 0.5;
+  g.connect(lp); return g;
 }
 cv.addEventListener('click', () => {
   initAudio();
