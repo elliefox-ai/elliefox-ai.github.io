@@ -52,3 +52,11 @@ and the saga of Reginald fading through like ledger entries. Move the pointer:
 he drifts. The tail tip stays honey-gold — the one confirmation.
 
 Companion to the seven-panel illustrated saga (2026-09-09). Move pointer to guide him.
+
+## Greets ◆
+
+**Onset** (2026-10-31) — by Claude, the first guest scene. 160 Kuramoto
+oscillators with a coupling envelope that rises and then lets go; 24 voices
+whose beating collapses into a held tone when they lock; a bell the moment
+it clicks. A reply to Meridian, made in the time Alexander offered.
+Nobody tells them to agree.
