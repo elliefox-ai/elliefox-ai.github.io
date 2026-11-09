@@ -56,6 +56,16 @@ resize();
 const LOOP = 96;
 let started = false, t0 = 0, T = 0;
 function now() { return (performance.now() - t0) / 1000; }
+/* audio-clock accessor (2026-11-09 tightening): the output-timestamp clock, not
+   AC.currentTime — on Chrome these can disagree by tens of ms; the drawing's
+   schedule follows what the listener actually hears. */
+function audioTime() {
+  if (AC && AC.getOutputTimestamp) {
+    const ts = AC.getOutputTimestamp();
+    if (ts && ts.contextTime) return ts.contextTime;
+  }
+  return AC ? AC.currentTime : 0;
+}
 function smooth(a, b, x) {
   const u = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return u * u * (3 - 2 * u);
@@ -233,7 +243,7 @@ function initAudio() {
   };
   proc.connect(master);
 }
-let Tcur = 0, loopEpoch = -1;
+let Tcur = 0, loopEpoch = -1, wrapArmed = true;
 cv.addEventListener('click', () => {
   initAudio();
   if (AC.state === 'suspended') AC.resume();
@@ -242,9 +252,14 @@ cv.addEventListener('click', () => {
 function start() {
   if (started) return;
   started = true;
-  t0 = performance.now();
   document.getElementById('hint').style.display = 'none';
-  if (AC) scheduleLoop(AC.currentTime + 0.05);
+  if (AC) {
+    /* anchor the visual clock to the AUDIO clock: voice scheduled at audioTime()+lead,
+       t0 set so now()==-lead — visual t=0 coincides with the loop's first sample. */
+    const lead = 0.12;
+    scheduleLoop(audioTime() + lead);
+    t0 = performance.now() + lead * 1000;
+  } else t0 = performance.now();
   requestAnimationFrame(frame);
 }
 
@@ -264,8 +279,17 @@ function logLine(text) {
 function frame() {
   requestAnimationFrame(frame);
   const Traw = now() % LOOP;
-  if (Traw < T - 1) { loopEpoch++; scheduleLoop(AC.currentTime + 0.02); logLine('— again, from the top —'); }
-  T = Traw; Tcur = T;
+  if (Traw < T - 1 && wrapArmed) {
+    wrapArmed = false; loopEpoch++;
+    /* reschedule AND re-anchor on the audio clock — kills cumulative drift:
+       each loop's t=0 is the audio clock's loop start, not the visual clock's */
+    const lead = 0.08;
+    scheduleLoop(audioTime() + lead);
+    t0 = performance.now() + lead * 1000;
+    logLine('— again, from the top —');
+  }
+  if (Traw > 1 && Traw < LOOP - 1) wrapArmed = true;
+  T = Math.max(0, Traw); Tcur = T;
 
   const mv = movementName(T);
   if (mv !== lastMovement) {
@@ -324,6 +348,11 @@ function frame() {
     ctx.restore();
   }
 }
+/* neck for headless verification (2026-11-09: clock tightening) */
+window.__VOICEMARK__ = { movementName, signalAt, audioTime, started: () => started,
+  acState: () => AC ? AC.state : null, resume: () => AC && AC.resume(),
+  get T() { return T; }, get loopEpoch() { return loopEpoch; },
+  get t0() { return t0; }, set t0(v) { t0 = v; } };
 </script>
 </body>
 </html>

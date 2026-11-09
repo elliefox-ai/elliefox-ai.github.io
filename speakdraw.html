@@ -56,8 +56,17 @@ resize();
 /* ---------- clock ---------- */
 const LOOP = 91;
 const M = { learn:[0,21], spell:[21,43.4], say:[43.4,56], coda:[56,84], tail:[84,91] };
-let started = false, t0 = 0, T = 0, Tcur = 0;
+let started = false, t0 = 0, T = 0, Tcur = 0, wrapArmed = true, loopEpoch = 0;
 function now() { return (performance.now() - t0) / 1000; }
+/* audio-clock accessor (2026-11-09 tightening): output-timestamp clock preferred
+   over AC.currentTime — schedule follows what the listener hears. */
+function audioTime() {
+  if (AC && AC.getOutputTimestamp) {
+    const ts = AC.getOutputTimestamp();
+    if (ts && ts.contextTime) return ts.contextTime;
+  }
+  return AC ? AC.currentTime : 0;
+}
 function smooth(a, b, x) {
   const u = Math.min(1, Math.max(0, (x - a) / (b - a)));
   return u * u * (3 - 2 * u);
@@ -355,7 +364,7 @@ function initAudio() {
   const soften = AC.createBiquadFilter(); soften.type = 'lowpass'; soften.frequency.value = 3400;
   master.connect(soften).connect(AC.destination);
   vGain = AC.createGain(); vGain.gain.value = 0.9; vGain.connect(master);
-  var toneGain = toneChain(AC);
+  var toneIn = toneChain(AC);
   const proc = AC.createScriptProcessor(512, 0, 2);
   proc.onaudioprocess = function (e) {
     const Lc = e.outputBuffer.getChannelData(0);
@@ -369,7 +378,7 @@ function initAudio() {
       ringW = (ringW + 1) & 2047;
     }
   };
-  proc.connect(toneLP).connect(toneGain).connect(master);
+  proc.connect(toneIn);
 }
 /* tone-layer comfort (2026-10-27, operator: "sharp and loud" between words):
    the figure signal is pure sines ~380-620 Hz at voice level — now 18 dB under
@@ -377,7 +386,8 @@ function initAudio() {
 function toneChain(ac) {
   const g = ac.createGain(); g.gain.value = 0.125;
   const lp = ac.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 900; lp.Q.value = 0.5;
-  g.connect(lp); return g;
+  g.connect(lp); lp.connect(master);
+  return g;  /* input node of the tone chain (fix 2026-11-09: toneLP was referenced but never defined — initAudio threw, piece was silent) */
 }
 cv.addEventListener('click', () => {
   initAudio();
@@ -387,9 +397,14 @@ cv.addEventListener('click', () => {
 function start() {
   if (started) return;
   started = true;
-  t0 = performance.now();
   document.getElementById('hint').style.display = 'none';
-  if (AC) scheduleLoop(AC.currentTime + 0.05);
+  if (AC) {
+    /* anchor visual clock to the AUDIO clock: voice at audioTime()+lead, t0 set so
+       now()==-lead — visual t=0 coincides with the loop's first audible sample. */
+    const lead = 0.12;
+    scheduleLoop(audioTime() + lead);
+    t0 = performance.now() + lead * 1000;
+  } else t0 = performance.now();
   requestAnimationFrame(frame);
 }
 
@@ -416,8 +431,16 @@ const MVTXT = {
 function frame() {
   requestAnimationFrame(frame);
   const Traw = now() % LOOP;
-  if (Traw < T - 1) { scheduleLoop(AC.currentTime + 0.02); logLine('— again, from the top —'); }
-  T = Traw; Tcur = T;
+  if (Traw < T - 1 && wrapArmed) {
+    wrapArmed = false; loopEpoch++;
+    /* reschedule AND re-anchor on the audio clock — kills cumulative drift */
+    const lead = 0.08;
+    scheduleLoop(audioTime() + lead);
+    t0 = performance.now() + lead * 1000;
+    logLine('— again, from the top —');
+  }
+  if (Traw > 1 && Traw < LOOP - 1) wrapArmed = true;
+  T = Math.max(0, Traw); Tcur = T;
 
   const mv = movementName(T);
   if (mv !== lastMovement) { lastMovement = mv; logLine(MVTXT[mv]); }
@@ -491,9 +514,12 @@ function frame() {
   }
 }
 /* neck for headless verification */
-window.__SPEAKDRAW__ = { get T() { return T; }, movementName, activeUtt, signalAt,
+window.__SPEAKDRAW__ = { get T() { return T; }, movementName, activeUtt, signalAt, audioTime,
+  acState: () => AC ? AC.state : null, resume: () => AC && AC.resume(),
+  started: () => started, get loopEpoch() { return loopEpoch; },
+  get t0() { return t0; }, set t0(v) { t0 = v; },
   ringEnergy: () => { let e = 0; for (let i = 0; i < 4096; i += 2) e += ring[i]*ring[i] + ring[i+1]*ring[i+1]; return e / 2048; },
-  started: () => started, buffers: () => Object.keys(VOICE.buf).map(k => k + ':' + VOICE.buf[k].length) };
+  buffers: () => Object.keys(VOICE.buf).map(k => k + ':' + VOICE.buf[k].length) };
 </script>
 </body>
 </html>
