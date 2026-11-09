@@ -108,16 +108,16 @@ const UTTS = [
   { t: 17.0, key: 'I',     g: 1.0, fig: [1, 1],  name: 'I' },
   { t: 24.0, key: 'ELLIE', g: 1.0, fig: null,    name: 'the whole word' },
   /* vowels: breaths of AH */
-  { t: 38.0, key: 'AHH', g: 0.9, fig: null, name: 'ah' },
-  { t: 42.5, key: 'AHH', g: 0.9, fig: null, name: 'ah' },
-  { t: 47.0, key: 'AHH', g: 0.9, fig: null, name: 'ah' },
-  { t: 51.5, key: 'AHH', g: 0.9, fig: null, name: 'ah' },
+  { t: 38.0, key: 'AHH', g: 0.9, fig: null, atk: 1.2, rel: 1.0, name: 'ah' },
+  { t: 42.5, key: 'AHH', g: 0.9, fig: null, atk: 1.2, rel: 1.0, name: 'ah' },
+  { t: 47.0, key: 'AHH', g: 0.9, fig: null, atk: 1.2, rel: 1.0, name: 'ah' },
+  { t: 51.5, key: 'AHH', g: 0.9, fig: null, atk: 1.2, rel: 1.0, name: 'ah' },
   /* lock: the name, softly, while the fundamental draws */
   { t: 60.0, key: 'ELLIE', g: 0.55, fig: null, name: 'ellie' },
   { t: 66.0, key: 'ELLIE', g: 0.55, fig: null, name: 'ellie' },
   { t: 72.0, key: 'ELLIE', g: 0.55, fig: null, name: 'ellie' },
   /* coda: one last ah, fading to a tone */
-  { t: 76.0, key: 'AHH', g: 0.7, fig: null, name: 'ah — ' }
+  { t: 76.0, key: 'AHH', g: 0.7, fig: null, atk: 1.2, rel: 1.4, name: 'ah — ' }
 ];
 function sampleAt(key, tGlobal, tStart) {
   /* the sample being PLAYED at piece-time tGlobal, given voice start tStart */
@@ -215,12 +215,14 @@ function playVoice(U, acStart) {
   buf.copyToChannel(VOICE.buf[U.key], 0);
   src.buffer = buf;
   const g = AC.createGain();
-  /* ramps (2026-11-09 fix): no un-ramped onsets — attack and release ramped,
-     kills the pops at utterance boundaries */
+  /* envelopes (2026-11-09 rev2): breaths swell like breaths — AHH gets a slow
+     attack/release (atk/rel seconds); words keep a short edge fade only, so the
+     sample's own natural envelope carries. No hard ramps on consonant onsets. */
   const dur = VOICE.buf[U.key].length / VOICE.sr;
+  const atk = U.atk || 0.012, rel = U.rel || 0.012;
   g.gain.setValueAtTime(0, acStart);
-  g.gain.linearRampToValueAtTime(U.g * 0.9, acStart + 0.02);
-  g.gain.setValueAtTime(U.g * 0.9, acStart + Math.max(0.02, dur - 0.02));
+  g.gain.linearRampToValueAtTime(U.g * 0.9, acStart + Math.min(atk, dur / 3));
+  g.gain.setValueAtTime(U.g * 0.9, acStart + dur - Math.min(rel, dur / 3));
   g.gain.linearRampToValueAtTime(0, acStart + dur);
   src.connect(g).connect(vGain);
   src.start(acStart);

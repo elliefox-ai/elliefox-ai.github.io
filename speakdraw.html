@@ -354,12 +354,12 @@ function playVoice(U, acStart) {
   buf.copyToChannel(VOICE.buf[U.k], 0);
   src.buffer = buf;
   const g = AC.createGain();
-  /* ramps (2026-11-09 fix): no un-ramped onsets — attack and release are ramped,
-     which kills the pops/clicks at utterance boundaries */
-  const dur = VOICE.buf[U.key].length / VOICE.sr;
+  /* envelopes (2026-11-09 rev2): short edge fades only — the sample's own
+     natural envelope carries; no mechanical 20ms attack chop */
+  const dur = VOICE.buf[U.k].length / VOICE.sr;
   g.gain.setValueAtTime(0, acStart);
-  g.gain.linearRampToValueAtTime(U.g * 0.9, acStart + 0.02);
-  g.gain.setValueAtTime(U.g * 0.9, acStart + Math.max(0.02, dur - 0.02));
+  g.gain.linearRampToValueAtTime(U.g * 0.9, acStart + 0.012);
+  g.gain.setValueAtTime(U.g * 0.9, acStart + dur - 0.012);
   g.gain.linearRampToValueAtTime(0, acStart + dur);
   src.connect(g).connect(vGain);
   src.start(acStart);
