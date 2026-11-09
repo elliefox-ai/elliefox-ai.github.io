@@ -335,13 +335,16 @@ function signalAt(dt, t) {
   } else if (mv === 'say' || mv === 'tail') {
     /* between passes / at the very end: the last trace lingers as a faint circle */
     const w = 2 * Math.PI * 180 * S.tau;
-    const linger = (mv === 'say') ? 0.14 : 0.14 * (1 - smooth(83, 86.5, t));
+    const linger = (mv === 'say') ? 0.14 : 0.03 * (1 - smooth(84, 87, t));
     x = linger * Math.sin(w);
     y = linger * Math.sin(w + Math.PI / 2);
     S.prev = 0;
   } else {
     x = 0; y = 0; S.prev = 0;
   }
+  /* wrap continuity (2026-11-09 fix): tone/signal path fades in over the first
+     beat so the loop boundary is sample-continuous — no click at wrap */
+  const wf = smooth(0, 0.8, t); x *= wf; y *= wf;
   return [x, y];
 }
 
@@ -350,7 +353,14 @@ function playVoice(U, acStart) {
   const buf = AC.createBuffer(1, VOICE.buf[U.k].length, VOICE.sr);
   buf.copyToChannel(VOICE.buf[U.k], 0);
   src.buffer = buf;
-  const g = AC.createGain(); g.gain.value = U.g * 0.9;
+  const g = AC.createGain();
+  /* ramps (2026-11-09 fix): no un-ramped onsets — attack and release are ramped,
+     which kills the pops/clicks at utterance boundaries */
+  const dur = VOICE.buf[U.key].length / VOICE.sr;
+  g.gain.setValueAtTime(0, acStart);
+  g.gain.linearRampToValueAtTime(U.g * 0.9, acStart + 0.02);
+  g.gain.setValueAtTime(U.g * 0.9, acStart + Math.max(0.02, dur - 0.02));
+  g.gain.linearRampToValueAtTime(0, acStart + dur);
   src.connect(g).connect(vGain);
   src.start(acStart);
 }
@@ -401,7 +411,7 @@ function start() {
   if (AC) {
     /* anchor visual clock to the AUDIO clock: voice at audioTime()+lead, t0 set so
        now()==-lead — visual t=0 coincides with the loop's first audible sample. */
-    const lead = 0.12;
+    const lead = 0.12 + (AC.outputLatency || 0.15);
     scheduleLoop(audioTime() + lead);
     t0 = performance.now() + lead * 1000;
   } else t0 = performance.now();
@@ -434,7 +444,7 @@ function frame() {
   if (Traw < T - 1 && wrapArmed) {
     wrapArmed = false; loopEpoch++;
     /* reschedule AND re-anchor on the audio clock — kills cumulative drift */
-    const lead = 0.08;
+    const lead = 0.08 + (AC.outputLatency || 0.15);
     scheduleLoop(audioTime() + lead);
     t0 = performance.now() + lead * 1000;
     logLine('— again, from the top —');
