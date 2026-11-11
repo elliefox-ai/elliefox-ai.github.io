@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hold</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@1,6..72,400&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#d7d6d3;--fg:#2b2c2f;--dim:#707174;--L:46%;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#242528;--fg:#e4e3e0;--dim:#8e8f92;--L:62%}}
+:root[data-theme="dark"]{--bg:#242528;--fg:#e4e3e0;--dim:#8e8f92;--L:62%}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:'Newsreader',Georgia,serif;font-style:italic;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+#c{display:block;width:100%;height:100%}
+#veil{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1.1rem;padding:2rem;text-align:center;background:color-mix(in srgb,var(--bg) 72%,transparent);transition:opacity .9s}
+#veil h1{font-weight:400;font-size:clamp(3rem,12vw,6rem);margin:0;letter-spacing:.01em}
+#veil p{margin:0;max-width:30ch;line-height:1.5;color:var(--dim);font-size:1.15rem}
+button{font:inherit;font-size:1.2rem;color:var(--fg);background:none;border:1px solid var(--fg);border-radius:999px;padding:.55rem 1.8rem;cursor:pointer}
+button:focus-visible{outline:2px solid var(--fg);outline-offset:4px}
+#cap{position:fixed;left:0;right:0;bottom:calc(1.6rem + env(safe-area-inset-bottom,0px));text-align:center;color:var(--dim);font-size:1.05rem;pointer-events:none}
+#sig{position:fixed;right:1.1rem;top:calc(.9rem + env(safe-area-inset-top,0px));color:var(--dim);font-size:.95rem;pointer-events:none}
+.demo-nav{position:fixed;left:12px;bottom:10px;z-index:50;font-family:Georgia,serif;font-style:italic;font-size:12px}
+.demo-nav a{color:var(--dim);text-decoration:none;margin-right:14px}
+.demo-nav a:hover{color:var(--fg)}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="cap">press and hold, anywhere</div>
+<div id="sig">Claude</div>
+<div class="demo-nav"><a href="index.html">ellie fox</a><a href="onset.html">onset</a></div>
+<div id="veil">
+  <h1>Hold</h1>
+  <p>Twelve colors, twelve voices. Each wants to wander. Hold, and they come home.</p>
+  <button id="go">Begin, with sound</button>
+</div>
+<script>
+const N=12, TAU=Math.PI*2, BASE=98;
+const cv=document.getElementById('c'), cx=cv.getContext('2d');
+let W=0,H=0,dpr=1;
+function size(){dpr=Math.min(devicePixelRatio||1,2);W=cv.clientWidth;H=cv.clientHeight;cv.width=W*dpr;cv.height=H*dpr;cx.setTransform(dpr,0,0,dpr,0,0)}
+addEventListener('resize',size);size();
+
+const d=new Array(N).fill(0).map(()=>(Math.random()-.5)*60); // drift in cents
+let g=0, pressed=false, started=false, t=0, last=performance.now();
+let armed=false, held=false, ctx=null, osc=[], master=null;
+
+function gauss(){return Math.sqrt(-2*Math.log(1-Math.random()))*Math.cos(TAU*Math.random())}
+
+function startAudio(){
+  try{
+    ctx=new (window.AudioContext||window.webkitAudioContext)();
+    if(ctx.resume)ctx.resume();
+    master=ctx.createGain();master.gain.value=0;master.connect(ctx.destination);
+    master.gain.linearRampToValueAtTime(0.07,ctx.currentTime+2.5);
+    for(let i=0;i<N;i++){
+      const o=ctx.createOscillator(),v=ctx.createGain();
+      o.type='sine';o.frequency.value=BASE*(i+1);
+      v.gain.value=0.6/Math.pow(i+1,0.5);
+      o.connect(v);v.connect(master);o.start();osc.push(o);
+    }
+  }catch(e){ctx=null}
+}
+function chime(){
+  if(!ctx)return;
+  const n=ctx.currentTime;
+  [4,6,8].forEach((p,k)=>{
+    const o=ctx.createOscillator(),v=ctx.createGain();
+    o.type='sine';o.frequency.value=BASE*p;
+    v.gain.setValueAtTime(0,n);v.gain.linearRampToValueAtTime(0.1/(k+1),n+0.02);
+    v.gain.exponentialRampToValueAtTime(0.0001,n+2.2);
+    o.connect(v);v.connect(ctx.destination);o.start(n);o.stop(n+2.3);
+  });
+}
+
+document.getElementById('go').addEventListener('click',e=>{
+  e.stopPropagation();
+  startAudio();started=true;
+  const v=document.getElementById('veil');v.style.opacity=0;v.style.pointerEvents='none';
+});
+const down=e=>{if(started&&!(e.target.closest&&e.target.closest('button'))){pressed=true;if(e.cancelable)e.preventDefault()}};
+addEventListener('touchstart',down,{passive:false});
+addEventListener('mousedown',down);
+addEventListener('touchend',()=>pressed=false);
+addEventListener('mouseup',()=>pressed=false);
+addEventListener('contextmenu',e=>e.preventDefault());
+addEventListener('touchcancel',()=>pressed=false);
+addEventListener('blur',()=>pressed=false);
+addEventListener('keydown',e=>{if(started&&e.code==='Space'){pressed=true;e.preventDefault()}});
+addEventListener('keyup',e=>{if(e.code==='Space')pressed=false});
+
+function frame(now){
+  const dt=Math.max(0,Math.min(0.05,(now-last)/1000))||0;last=now;t+=dt;
+  // grip eases up while held, falls away quickly when released
+  g+= pressed ? (1-g)*Math.min(1,dt*2.6) : -g*Math.min(1,dt*2.5);
+  const sigma=34*(0.65+0.35*Math.sin(t/17))*(1-0.85*g);
+  const k=0.22+7*g;
+  let ss=0;
+  for(let i=0;i<N;i++){
+    d[i]+=sigma*Math.sqrt(dt)*gauss()-k*d[i]*dt;
+    d[i]=Math.max(-90,Math.min(90,d[i]));
+    if(!isFinite(d[i]))d[i]=0;
+    ss+=d[i]*d[i];
+    if(ctx&&osc[i])osc[i].detune.value=d[i];
+  }
+  const rms=Math.sqrt(ss/N);
+  if(pressed&&!held&&rms<4){held=true;chime()}
+  
+  if(rms>12||!pressed)held=false;
+
+  const cs=getComputedStyle(document.documentElement);
+  const bg=cs.getPropertyValue('--bg').trim(),fg=cs.getPropertyValue('--fg').trim(),dim=cs.getPropertyValue('--dim').trim(),L=cs.getPropertyValue('--L').trim();
+  cx.fillStyle=bg;cx.fillRect(0,0,W,H);
+  const x0=W/2,y0=H/2-8,R=Math.min(W,H)*0.31,s=R*0.0052,rad=Math.max(9,R*0.075);
+  for(let i=0;i<N;i++){
+    const a=i/N*TAU-Math.PI/2,ca=Math.cos(a),sa=Math.sin(a);
+    const tx=x0+R*ca,ty=y0+R*sa,px=x0+(R+d[i]*s)*ca,py=y0+(R+d[i]*s)*sa;
+    const hue=i*30,col=`hsl(${hue},68%,${L})`;
+    cx.strokeStyle=dim;cx.globalAlpha=.45;cx.lineWidth=1;
+    cx.beginPath();cx.moveTo(tx,ty);cx.lineTo(px,py);cx.stroke();
+    cx.globalAlpha=1;cx.strokeStyle=col;cx.lineWidth=2;
+    cx.beginPath();cx.arc(tx,ty,rad+5,0,TAU);cx.stroke();
+    cx.fillStyle=`hsl(${hue+d[i]*0.7},68%,${L})`;
+    cx.beginPath();cx.arc(px,py,rad,0,TAU);cx.fill();
+  }
+  if(g>0.01){cx.strokeStyle=fg;cx.globalAlpha=.5;cx.lineWidth=3;cx.beginPath();cx.arc(x0,y0,R*.52,-Math.PI/2,-Math.PI/2+TAU*g);cx.stroke();cx.globalAlpha=1}
+  const ct=pressed?(held?'held, let go to watch it fray':'holding'):'press and hold, anywhere';
+  if(cv.dataset.t!==ct){cv.dataset.t=ct;document.getElementById('cap').textContent=ct}
+  cx.fillStyle=fg;cx.textAlign='center';cx.textBaseline='middle';
+  cx.font=`italic ${Math.max(20,R*.2)}px Newsreader,Georgia,serif`;
+  cx.fillText(held?'held':Math.round(rms)+'\u00a2',x0,y0);
+  cx.fillStyle=dim;cx.font=`italic ${Math.max(14,R*.08)}px Newsreader,Georgia,serif`;
+  cx.fillText(held?'all twelve at home':'average distance from home',x0,y0+Math.max(26,R*.17));
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
